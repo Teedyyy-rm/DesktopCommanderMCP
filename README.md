@@ -479,6 +479,15 @@ On first run, complete browser authentication, then connect your AI at **[mcp.de
 
 </details>
 
+<details>
+<summary><b>ChatGPT Web (self-hosted MCP)</b></summary>
+
+Run a local Streamable HTTP gateway and connect ChatGPT Web through your own HTTPS domain. This mode does not use the Remote Desktop Commander dashboard or its `remote` command.
+
+See **[Self-hosted ChatGPT Web setup](docs/chatgpt-web-self-hosted.md)** for OAuth credentials, HTTPS ingress requirements, and Developer mode steps. The gateway binds to `127.0.0.1`; you need to provide public DNS and HTTPS ingress before ChatGPT Web can connect.
+
+</details>
+
 ## Updating & Uninstalling Desktop Commander
 
 ### Automatic Updates (Options 1, 2, 3, 4 & 6)

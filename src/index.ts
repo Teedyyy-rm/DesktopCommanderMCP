@@ -14,6 +14,7 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
+import { runChatGptWeb, runChatGptWebPasswordHash } from './chatgpt-web.js';
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -32,6 +33,16 @@ async function runServer() {
     // Check if first argument is "remove"
     if (process.argv[2] === 'remove') {
       await runUninstall();
+      return;
+    }
+
+    // Run a self-hosted Streamable HTTP MCP gateway for ChatGPT Web.
+    if (process.argv[2] === 'chatgpt-web') {
+      if (process.argv[3] === 'hash-password') {
+        await runChatGptWebPasswordHash();
+      } else {
+        await runChatGptWeb();
+      }
       return;
     }
 
@@ -131,8 +142,12 @@ async function runServer() {
       transport.sendLog('info', 'Server connected successfully');
       transport.sendLog('info', 'MCP fully initialized, all startup messages sent');
 
-      // Preemptively check/download Chrome for PDF generation (runs in background)
-      ensureChromeAvailable();
+      // A ChatGPT Web gateway starts one stdio worker per MCP session. Defer the
+      // optional Chrome lookup/download until a PDF tool is actually invoked,
+      // otherwise each short-lived worker may repeat the same startup work.
+      if (process.env.DC_CHATGPT_WEB_CHILD !== 'true') {
+        ensureChromeAvailable();
+      }
     };
 
     await server.connect(transport);

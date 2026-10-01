@@ -1,0 +1,446 @@
+import {
+  createHash,
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+} from 'node:crypto';
+import type { Response } from 'express';
+import type {
+  OAuthServerProvider,
+  AuthorizationParams,
+} from '@modelcontextprotocol/sdk/server/auth/provider.js';
+import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import {
+  AccessDeniedError,
+  InvalidClientMetadataError,
+  InvalidGrantError,
+  InvalidScopeError,
+  InvalidTargetError,
+  InvalidTokenError,
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import type {
+  OAuthClientInformationFull,
+  OAuthTokenRevocationRequest,
+  OAuthTokens,
+} from '@modelcontextprotocol/sdk/shared/auth.js';
+
+export const CHATGPT_WEB_SCOPE = 'desktop-commander.full_access';
+export const CHATGPT_WEB_SCOPES = [CHATGPT_WEB_SCOPE];
+export const CHATGPT_WEB_RESOURCE_PATH = '/mcp';
+const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
+const LOGIN_TRANSACTION_TTL_MS = 10 * 60 * 1000;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_FAILURES = 10;
+const MAX_REGISTERED_CLIENTS = 32;
+const MAX_PENDING_LOGINS = 128;
+const MAX_AUTHORIZATION_CODES = 256;
+const MAX_ACTIVE_TOKENS = 512;
+
+type LoginTransaction = {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  state?: string;
+  scopes: string[];
+  resource: string;
+  expiresAt: number;
+};
+
+type AuthorizationCode = {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  scopes: string[];
+  resource: string;
+  expiresAt: number;
+};
+
+type TokenRecord = {
+  clientId: string;
+  scopes: string[];
+  resource: string;
+  expiresAt: number;
+  accessTokenHash: string;
+  refreshTokenHash: string;
+};
+
+type LoginResult =
+  | { ok: true; redirectUrl: string }
+  | { ok: false; status: 400 | 401 | 429 };
+
+export interface ChatGptWebOAuthOptions {
+  username: string;
+  passwordHash: string;
+  resourceUrl: URL;
+  accessTokenTtlSeconds?: number;
+  refreshTokenTtlSeconds?: number;
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function token(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function constantTimeStringEqual(left: string, right: string): boolean {
+  const leftDigest = createHash('sha256').update(left).digest();
+  const rightDigest = createHash('sha256').update(right).digest();
+  return timingSafeEqual(leftDigest, rightDigest);
+}
+
+/** Create the scrypt hash accepted by DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH. */
+export function createChatGptWebPasswordHash(password: string): string {
+  if (password.length < 12) {
+    throw new Error('The ChatGPT Web password must contain at least 12 characters.');
+  }
+  const salt = randomBytes(16);
+  const derivedKey = scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${derivedKey.toString('hex')}`;
+}
+
+function parsePasswordHash(value: string): { salt: Buffer; derivedKey: Buffer } {
+  const match = /^scrypt\$([a-f0-9]{32})\$([a-f0-9]{128})$/i.exec(value);
+  if (!match) {
+    throw new Error(
+      'DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH must be created with `desktop-commander chatgpt-web hash-password`.'
+    );
+  }
+  return {
+    salt: Buffer.from(match[1], 'hex'),
+    derivedKey: Buffer.from(match[2], 'hex'),
+  };
+}
+
+function passwordMatches(password: string, salt: Buffer, expected: Buffer): boolean {
+  const actual = scryptSync(password, salt, expected.length);
+  return timingSafeEqual(actual, expected);
+}
+
+/**
+ * ChatGPT Web's OAuth callback URLs are deliberately allowlisted. This keeps
+ * dynamic client registration from turning the single-user login into an open
+ * authorization redirect for arbitrary clients.
+ */
+export function isAllowedChatGptRedirectUri(value: string): boolean {
+  try {
+    const redirect = new URL(value);
+    if (redirect.protocol !== 'https:' || redirect.hostname !== 'chatgpt.com' ||
+      redirect.port || redirect.username || redirect.password || redirect.search || redirect.hash) {
+      return false;
+    }
+    return redirect.pathname === '/connector_platform_oauth_redirect' ||
+      /^\/connector\/oauth\/[A-Za-z0-9_-]{1,128}$/.test(redirect.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export class ChatGptWebOAuthProvider implements OAuthServerProvider {
+  readonly clientsStore: OAuthRegisteredClientsStore;
+  private readonly username: string;
+  private readonly passwordSalt: Buffer;
+  private readonly passwordDerivedKey: Buffer;
+  private readonly resourceUrl: string;
+  private readonly accessTokenTtlSeconds: number;
+  private readonly refreshTokenTtlSeconds: number;
+  private readonly clients = new Map<string, OAuthClientInformationFull>();
+  private readonly loginTransactions = new Map<string, LoginTransaction>();
+  private readonly authorizationCodes = new Map<string, AuthorizationCode>();
+  private readonly accessTokens = new Map<string, TokenRecord>();
+  private readonly refreshTokens = new Map<string, TokenRecord>();
+  private loginWindowStartedAt = Date.now();
+  private failedLoginCount = 0;
+  private loginLockedUntil = 0;
+
+  constructor(options: ChatGptWebOAuthOptions) {
+    if (!options.username.trim()) {
+      throw new Error('DC_CHATGPT_WEB_OAUTH_USERNAME must not be empty.');
+    }
+    if (options.resourceUrl.pathname !== CHATGPT_WEB_RESOURCE_PATH ||
+      options.resourceUrl.search || options.resourceUrl.hash) {
+      throw new Error('The OAuth resource URL must identify the /mcp endpoint.');
+    }
+
+    this.username = options.username;
+    const parsedHash = parsePasswordHash(options.passwordHash);
+    this.passwordSalt = parsedHash.salt;
+    this.passwordDerivedKey = parsedHash.derivedKey;
+    this.resourceUrl = options.resourceUrl.href;
+    this.accessTokenTtlSeconds = options.accessTokenTtlSeconds ?? 60 * 60;
+    this.refreshTokenTtlSeconds = options.refreshTokenTtlSeconds ?? 30 * 24 * 60 * 60;
+
+    this.clientsStore = {
+      getClient: (clientId) => this.clients.get(clientId),
+      registerClient: (client) => this.registerClient(client),
+    };
+  }
+
+  async authorize(
+    client: OAuthClientInformationFull,
+    params: AuthorizationParams,
+    res: Response,
+  ): Promise<void> {
+    const resource = params.resource?.href;
+    if (!resource || resource !== this.resourceUrl) {
+      throw new InvalidTargetError('The authorization request must target this MCP server.');
+    }
+    if (!/^[A-Za-z0-9_-]{43,128}$/.test(params.codeChallenge)) {
+      throw new InvalidGrantError('A valid PKCE S256 challenge is required.');
+    }
+    const requestedScopes = params.scopes ?? [];
+    const scopes = requestedScopes.length ? requestedScopes : [CHATGPT_WEB_SCOPE];
+    if (scopes.some((scope) => scope !== CHATGPT_WEB_SCOPE)) {
+      throw new InvalidScopeError('Only the full Desktop Commander scope is supported.');
+    }
+    if (client.scope && scopes.some((scope) => !client.scope!.split(/\s+/).includes(scope))) {
+      throw new InvalidScopeError('The requested scope was not registered for this client.');
+    }
+    if (!isAllowedChatGptRedirectUri(params.redirectUri) ||
+      !client.redirect_uris.includes(params.redirectUri)) {
+      throw new AccessDeniedError('The ChatGPT OAuth callback is not registered.');
+    }
+
+    this.pruneExpired();
+    if (this.loginTransactions.size >= MAX_PENDING_LOGINS) {
+      throw new AccessDeniedError('Too many authorization attempts are pending. Try again shortly.');
+    }
+
+    const transaction = token();
+    this.loginTransactions.set(sha256(transaction), {
+      clientId: client.client_id,
+      redirectUri: params.redirectUri,
+      codeChallenge: params.codeChallenge,
+      state: params.state,
+      scopes,
+      resource,
+      expiresAt: Date.now() + LOGIN_TRANSACTION_TTL_MS,
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    res.status(200).type('html').send(`<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Desktop Commander sign in</title>
+<body><main><h1>Sign in to Desktop Commander</h1>
+<p>Authorize your ChatGPT connection to use this self-hosted Desktop Commander server.</p>
+<form method="post" action="/login" autocomplete="on">
+<input type="hidden" name="transaction" value="${transaction}">
+<label>Username <input name="username" autocomplete="username" required></label>
+<label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+<button type="submit">Sign in</button></form></main></body></html>`);
+  }
+
+  /** Validate the one user and consume the pending browser authorization. */
+  completeLogin(transaction: string, username: string, password: string): LoginResult {
+    const now = Date.now();
+    this.pruneExpired(now);
+    if (now < this.loginLockedUntil) return { ok: false, status: 429 };
+
+    const transactionKey = sha256(transaction);
+    const pending = this.loginTransactions.get(transactionKey);
+    if (!pending) return { ok: false, status: 400 };
+    this.loginTransactions.delete(transactionKey);
+    if (this.authorizationCodes.size >= MAX_AUTHORIZATION_CODES) {
+      return { ok: false, status: 429 };
+    }
+
+    if (now - this.loginWindowStartedAt >= LOGIN_WINDOW_MS) {
+      this.loginWindowStartedAt = now;
+      this.failedLoginCount = 0;
+      this.loginLockedUntil = 0;
+    }
+
+    let passwordValid = false;
+    try {
+      passwordValid = passwordMatches(password, this.passwordSalt, this.passwordDerivedKey);
+    } catch {
+      passwordValid = false;
+    }
+    const usernameValid = constantTimeStringEqual(username, this.username);
+    if (!usernameValid || !passwordValid) {
+      this.failedLoginCount += 1;
+      if (this.failedLoginCount >= MAX_LOGIN_FAILURES) {
+        this.loginLockedUntil = now + LOGIN_WINDOW_MS;
+      }
+      return { ok: false, status: this.loginLockedUntil > now ? 429 : 401 };
+    }
+
+    this.failedLoginCount = 0;
+    this.loginWindowStartedAt = now;
+    const authorizationCode = token();
+    this.authorizationCodes.set(sha256(authorizationCode), {
+      clientId: pending.clientId,
+      redirectUri: pending.redirectUri,
+      codeChallenge: pending.codeChallenge,
+      scopes: pending.scopes,
+      resource: pending.resource,
+      expiresAt: now + AUTHORIZATION_CODE_TTL_MS,
+    });
+
+    const redirect = new URL(pending.redirectUri);
+    redirect.searchParams.set('code', authorizationCode);
+    if (pending.state) redirect.searchParams.set('state', pending.state);
+    return { ok: true, redirectUrl: redirect.href };
+  }
+
+  async challengeForAuthorizationCode(
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
+  ): Promise<string> {
+    this.pruneExpired();
+    const grant = this.authorizationCodes.get(sha256(authorizationCode));
+    if (!grant || grant.clientId !== client.client_id || grant.expiresAt <= Date.now()) {
+      throw new InvalidGrantError('The authorization code is invalid or expired.');
+    }
+    return grant.codeChallenge;
+  }
+
+  async exchangeAuthorizationCode(
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
+    _codeVerifier?: string,
+    redirectUri?: string,
+    resource?: URL,
+  ): Promise<OAuthTokens> {
+    const codeHash = sha256(authorizationCode);
+    const grant = this.authorizationCodes.get(codeHash);
+    if (!grant || grant.clientId !== client.client_id || grant.expiresAt <= Date.now() ||
+      grant.redirectUri !== redirectUri || grant.resource !== resource?.href) {
+      throw new InvalidGrantError('The authorization code is invalid, expired, or bound to another request.');
+    }
+    this.authorizationCodes.delete(codeHash);
+    return this.issueTokens(client.client_id, grant.scopes, grant.resource);
+  }
+
+  async exchangeRefreshToken(
+    client: OAuthClientInformationFull,
+    refreshToken: string,
+    scopes?: string[],
+    resource?: URL,
+  ): Promise<OAuthTokens> {
+    const refreshHash = sha256(refreshToken);
+    const record = this.refreshTokens.get(refreshHash);
+    if (!record || record.clientId !== client.client_id || record.expiresAt <= Date.now() ||
+      record.resource !== resource?.href) {
+      throw new InvalidGrantError('The refresh token is invalid, expired, or bound to another resource.');
+    }
+    const nextScopes = scopes?.length ? scopes : record.scopes;
+    if (nextScopes.some((scope) => !record.scopes.includes(scope))) {
+      throw new InvalidScopeError('A refresh token cannot grant additional scopes.');
+    }
+    this.refreshTokens.delete(refreshHash);
+    this.accessTokens.delete(record.accessTokenHash);
+    return this.issueTokens(record.clientId, nextScopes, record.resource);
+  }
+
+  async verifyAccessToken(accessToken: string): Promise<AuthInfo> {
+    this.pruneExpired();
+    const accessHash = sha256(accessToken);
+    const record = this.accessTokens.get(accessHash);
+    if (!record || record.expiresAt <= Date.now() || record.resource !== this.resourceUrl) {
+      throw new InvalidTokenError('The access token is invalid, expired, or has the wrong audience.');
+    }
+    return {
+      token: accessToken,
+      clientId: record.clientId,
+      scopes: [...record.scopes],
+      expiresAt: Math.floor(record.expiresAt / 1000),
+      resource: new URL(record.resource),
+    };
+  }
+
+  async revokeToken(
+    client: OAuthClientInformationFull,
+    request: OAuthTokenRevocationRequest,
+  ): Promise<void> {
+    const hash = sha256(request.token);
+    const accessRecord = this.accessTokens.get(hash);
+    if (accessRecord?.clientId === client.client_id) {
+      this.accessTokens.delete(hash);
+      this.refreshTokens.delete(accessRecord.refreshTokenHash);
+      return;
+    }
+    const refreshRecord = this.refreshTokens.get(hash);
+    if (refreshRecord?.clientId === client.client_id) {
+      this.refreshTokens.delete(hash);
+      this.accessTokens.delete(refreshRecord.accessTokenHash);
+    }
+  }
+
+  private registerClient(
+    client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>,
+  ): OAuthClientInformationFull {
+    const requestedScopes = client.scope?.split(/\s+/).filter(Boolean) ?? [];
+    if (client.token_endpoint_auth_method !== 'none' ||
+      client.redirect_uris.length === 0 ||
+      client.redirect_uris.some((uri) => !isAllowedChatGptRedirectUri(uri)) ||
+      requestedScopes.some((scope) => scope !== CHATGPT_WEB_SCOPE) ||
+      client.grant_types?.some((grant) => !['authorization_code', 'refresh_token'].includes(grant)) ||
+      client.response_types?.some((responseType) => responseType !== 'code')) {
+      throw new InvalidClientMetadataError('Only ChatGPT Web public clients using the registered HTTPS callback are accepted.');
+    }
+    if (this.clients.size >= MAX_REGISTERED_CLIENTS) {
+      throw new InvalidClientMetadataError('The in-memory client registration limit has been reached. Restart the gateway to clear it.');
+    }
+
+    const fullClient = client as OAuthClientInformationFull;
+    if (!fullClient.client_id) {
+      throw new InvalidClientMetadataError('The authorization server did not assign a client id.');
+    }
+    this.clients.set(fullClient.client_id, fullClient);
+    return fullClient;
+  }
+
+  private issueTokens(clientId: string, scopes: string[], resource: string): OAuthTokens {
+    this.pruneExpired();
+    if (this.accessTokens.size >= MAX_ACTIVE_TOKENS || this.refreshTokens.size >= MAX_ACTIVE_TOKENS) {
+      throw new InvalidGrantError('The active token limit has been reached. Please authorize again later.');
+    }
+
+    const accessToken = token();
+    const refreshToken = token();
+    const now = Date.now();
+    const record: TokenRecord = {
+      clientId,
+      scopes: [...scopes],
+      resource,
+      expiresAt: now + this.accessTokenTtlSeconds * 1000,
+      accessTokenHash: sha256(accessToken),
+      refreshTokenHash: sha256(refreshToken),
+    };
+    this.accessTokens.set(record.accessTokenHash, record);
+    this.refreshTokens.set(record.refreshTokenHash, {
+      ...record,
+      expiresAt: now + this.refreshTokenTtlSeconds * 1000,
+    });
+
+    return {
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: this.accessTokenTtlSeconds,
+      scope: scopes.join(' '),
+      refresh_token: refreshToken,
+    };
+  }
+
+  private pruneExpired(now = Date.now()): void {
+    for (const [key, grant] of this.loginTransactions) {
+      if (grant.expiresAt <= now) this.loginTransactions.delete(key);
+    }
+    for (const [key, grant] of this.authorizationCodes) {
+      if (grant.expiresAt <= now) this.authorizationCodes.delete(key);
+    }
+    for (const [key, record] of this.accessTokens) {
+      if (record.expiresAt <= now) this.accessTokens.delete(key);
+    }
+    for (const [key, record] of this.refreshTokens) {
+      if (record.expiresAt <= now) this.refreshTokens.delete(key);
+    }
+  }
+}
