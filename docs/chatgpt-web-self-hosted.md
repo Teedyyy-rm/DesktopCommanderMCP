@@ -64,14 +64,15 @@ Trên Linux dùng systemd user service, xem log realtime bằng:
 journalctl --user -u desktop-commander-chatgpt-web.service -n 100 -f
 ```
 
-Mỗi lệnh ChatGPT gọi qua gateway tạo log bắt đầu và log kết quả, ví dụ:
+Mỗi lệnh ChatGPT gọi qua gateway tạo log nhận lệnh và log kết quả theo dạng của `desktop-commander remote`, ví dụ:
 
 ```text
-[ChatGPT Web MCP] tool_call started call=8f6a... tool="start_process"
-[ChatGPT Web MCP] tool_call completed call=8f6a... tool="start_process" status=ok duration_ms=42
+🔧 Received tool call 81f...: start_process {"command":"pwd","timeout_ms":3000} metadata: {"transport":"streamable_http","clientInfo":{"name":"openai-mcp","version":"1.0.0"},"oauth_client_id":"...","origin_instance":"...","gateway_pid":1234,"session_id":"..."}
+✅ Tool call start_process completed:
+ {"content":[{"type":"text","text":"Process started with PID 1234 (shell: /usr/bin/zsh)\\nInitial output:\\n/home/obito/projects/DesktopCommanderMCP"}]}
 ```
 
-`status=ok` nghĩa là tool trả kết quả bình thường; `status=tool_error` nghĩa là MCP tool trả nội dung lỗi; `status=failed` nghĩa là lời gọi tới tiến trình Desktop Commander gặp lỗi giao thức/tiến trình. Log không ghi arguments hay kết quả của tool để tránh đưa dữ liệu tệp, lệnh hoặc bí mật vào journal. Có thể kiểm tra gateway còn phục vụ HTTP bằng:
+Metadata ghi transport, client MCP thực tế, OAuth client, instance gateway và session MCP; khi không gọi được tool, journal ghi dòng `❌ Tool call ... failed`. Log này bao gồm arguments và nội dung kết quả giống terminal `remote`. Có thể kiểm tra gateway còn phục vụ HTTP bằng:
 
 ```sh
 systemctl --user is-active desktop-commander-chatgpt-web.service

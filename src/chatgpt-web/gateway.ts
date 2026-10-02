@@ -1,5 +1,5 @@
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
@@ -41,13 +41,23 @@ export interface ChatGptWebGatewayOptions {
   toolCallLogger?: (event: ChatGptWebToolCallLogEvent) => void;
 }
 
+export interface ChatGptWebToolCallMetadata {
+  transport: 'streamable_http';
+  clientInfo: { name: string; version: string };
+  oauth_client_id: string;
+  origin_instance: string;
+  gateway_pid: number;
+  session_id?: string;
+}
+
 export type ChatGptWebToolCallLogEvent =
-  | { phase: 'started'; callId: string; tool: string }
-  | { phase: 'completed'; callId: string; tool: string; status: 'ok' | 'tool_error' | 'failed'; durationMs: number };
+  | { phase: 'started'; callId: string; tool: string; arguments: Record<string, unknown>; metadata: ChatGptWebToolCallMetadata }
+  | { phase: 'completed'; callId: string; tool: string; status: 'ok' | 'tool_error' | 'failed'; durationMs: number; result?: unknown; error?: string; metadata: ChatGptWebToolCallMetadata };
 
 interface ProxySession {
   id?: string;
   clientId: string;
+  clientInfo: { name: string; version: string };
   upstream: Client;
   frontServer: Server;
   transport: StreamableHTTPServerTransport;
@@ -114,6 +124,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   const publicUrl = new URL(options.publicUrl.href);
   const resourceUrl = new URL(CHATGPT_WEB_RESOURCE_PATH, publicUrl);
   const idleTimeoutMs = options.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+  const gatewayInstanceId = randomBytes(12).toString('hex');
 
   if (publicUrl.protocol !== 'https:' || publicUrl.pathname !== '/' || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash) {
     throw new Error('DC_CHATGPT_WEB_PUBLIC_URL must be an HTTPS origin without a path, credentials, query, or fragment.');
@@ -194,11 +205,13 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   });
 
   const logToolCall = options.toolCallLogger ?? ((event: ChatGptWebToolCallLogEvent) => {
-    const call = `call=${event.callId} tool=${JSON.stringify(event.tool)}`;
+    const call = `tool ${event.tool}`;
     if (event.phase === 'started') {
-      console.info(`[ChatGPT Web MCP] tool_call started ${call}`);
+      console.info(`🔧 Received tool call ${event.callId}: ${event.tool} ${JSON.stringify(event.arguments)} metadata: ${JSON.stringify(event.metadata)}`);
+    } else if (event.status === 'failed') {
+      console.error(`❌ Tool call ${call} failed after ${event.durationMs}ms: ${event.error ?? 'Unknown error'}`);
     } else {
-      console.info(`[ChatGPT Web MCP] tool_call completed ${call} status=${event.status} duration_ms=${event.durationMs}`);
+      console.info(`✅ Tool call ${event.tool} completed:\n ${JSON.stringify(event.result)}`);
     }
   });
 
@@ -281,7 +294,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     session.idleTimer.unref();
   };
 
-  const createSession = async (clientId: string): Promise<ProxySession> => {
+  const createSession = async (clientId: string, clientInfo: { name: string; version: string }): Promise<ProxySession> => {
     await reserveSessionSlot();
     let reservationReleased = false;
     const releaseReservation = () => {
@@ -306,10 +319,19 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       frontServer.setRequestHandler(ListToolsRequestSchema, async (request) =>
         upstream!.listTools(request.params));
       frontServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const callId = randomBytes(6).toString('hex');
+        const callId = randomUUID();
         const tool = request.params.name;
+        const args = request.params.arguments ?? {};
         const startedAt = Date.now();
-        logToolCall({ phase: 'started', callId, tool });
+        const metadata: ChatGptWebToolCallMetadata = {
+          transport: 'streamable_http',
+          clientInfo: session!.clientInfo,
+          oauth_client_id: session!.clientId,
+          origin_instance: gatewayInstanceId,
+          gateway_pid: process.pid,
+          ...(session!.id ? { session_id: session!.id } : {}),
+        };
+        logToolCall({ phase: 'started', callId, tool, arguments: args, metadata });
         try {
           const result = await upstream!.callTool(request.params);
           logToolCall({
@@ -318,17 +340,20 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
             tool,
             status: result.isError ? 'tool_error' : 'ok',
             durationMs: Math.max(0, Date.now() - startedAt),
+            result,
+            metadata,
           });
           return result;
         } catch (error) {
           const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-          console.error(`[ChatGPT Web MCP] Upstream tool ${request.params.name} failed: ${details}`);
           logToolCall({
             phase: 'completed',
             callId,
             tool,
             status: 'failed',
             durationMs: Math.max(0, Date.now() - startedAt),
+            error: details,
+            metadata,
           });
           throw error;
         }
@@ -359,6 +384,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       });
       session = {
         clientId,
+        clientInfo,
         upstream,
         frontServer,
         transport,
@@ -384,8 +410,8 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     }
   };
 
-  const createTrackedSession = (clientId: string): Promise<ProxySession> => {
-    const creation = createSession(clientId);
+  const createTrackedSession = (clientId: string, clientInfo: { name: string; version: string }): Promise<ProxySession> => {
+    const creation = createSession(clientId, clientInfo);
     pendingSessionCreations.add(creation);
     void creation.then(
       () => pendingSessionCreations.delete(creation),
@@ -411,7 +437,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       }
     } else if (req.method === 'POST' && isInitializeRequest(req.body)) {
       try {
-        session = await createTrackedSession(authInfo.clientId);
+        session = await createTrackedSession(authInfo.clientId, req.body.params.clientInfo);
       } catch (error) {
         const details = error instanceof Error ? error.message : String(error);
         console.error(`[ChatGPT Web MCP] Local Desktop Commander session startup failed: ${details}`);

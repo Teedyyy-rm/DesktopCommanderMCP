@@ -116,7 +116,14 @@ async function run() {
       { phase: 'completed', tool: 'throw_error', status: 'failed' },
     ], 'tool-call logs should show start and outcome for normal, tool-level and transport errors');
     assert.ok(toolCallLogs.filter((event) => event.phase === 'completed').every((event) => event.durationMs >= 0));
-    assert.equal(JSON.stringify(toolCallLogs).includes('hello'), false, 'tool arguments and results must not be logged');
+    assert.deepEqual(toolCallLogs[0].arguments, { text: 'hello' }, 'the received-call log should include tool arguments');
+    assert.equal(toolCallLogs[0].metadata.transport, 'streamable_http');
+    assert.deepEqual(toolCallLogs[0].metadata.clientInfo, { name: 'mcp-inspector-test', version: '1.0.0' });
+    assert.equal(toolCallLogs[0].metadata.oauth_client_id, registration.body.client_id);
+    assert.equal(toolCallLogs[0].metadata.session_id, first.transport.sessionId);
+    assert.equal(toolCallLogs[1].result.content[0].text, 'echo:hello', 'the completed-call log should include the MCP result');
+    assert.equal(toolCallLogs[3].result.isError, true, 'tool-level error output should be logged');
+    assert.match(toolCallLogs[5].error, /simulated upstream failure/);
 
     const resources = await first.client.listResources();
     assert.equal(resources.resources[0].uri, 'test://resource/1');
@@ -146,7 +153,7 @@ async function run() {
     await harness.close();
     await waitFor(() => childCloses === 4);
 
-    console.log('✓ Streamable HTTP initialize, health endpoint, tool-call observability, tool/resource/prompt proxy, errors, CORS, per-session child cleanup, idle expiry, shutdown cleanup and loopback binding passed');
+    console.log('✓ Streamable HTTP initialize, health endpoint, full tool arguments/results and request metadata logging, tool/resource/prompt proxy, errors, CORS, per-session child cleanup, idle expiry, shutdown cleanup and loopback binding passed');
   } finally {
     for (const { client } of clients) await client.close().catch(() => undefined);
     await harness.close();
