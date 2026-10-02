@@ -136,7 +136,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   app.post('/login', (req, res) => {
     const body = req.body as Record<string, unknown>;
     const transaction = typeof body.transaction === 'string' ? body.transaction : '';
-    const accessKey = typeof body.accessKey === 'string' ? body.accessKey : '';
+    const accessKey = typeof body.accessKey === 'string' ? body.accessKey : undefined;
     const result = options.oauthProvider.completeLogin(transaction, accessKey);
     if (!result.ok) {
       res.setHeader('Pragma', 'no-cache');
@@ -145,11 +145,13 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       const message = result.status === 429
         ? 'Sign-in is temporarily rate limited. Try again later.'
         : result.status === 400
-          ? 'This sign-in request is invalid or has expired. Restart the ChatGPT authorization flow.'
+          ? 'This sign-in request is no longer available. Start a new connection from ChatGPT.'
           : 'The access key is incorrect. Try again.';
       const retryForm = result.status === 401 && /^[A-Za-z0-9_-]{43}$/.test(transaction)
         ? `<form method="post" action="/login" autocomplete="off"><input type="hidden" name="transaction" value="${transaction}"><label>Access key <input name="accessKey" type="password" autocomplete="off" required autofocus></label><button type="submit">Try again</button></form>`
-        : '<p><a href="/">Return to the authorization flow.</a></p>';
+        : result.status === 400
+          ? '<p>Return to ChatGPT and start the connection again from the app.</p>'
+          : '<p>Return to ChatGPT and try again later.</p>';
       res.status(result.status).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in failed</title><body><h1>Sign in failed</h1><p>${message}</p>${retryForm}</body></html>`);
       return;
     }

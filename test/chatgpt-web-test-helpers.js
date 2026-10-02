@@ -75,12 +75,14 @@ export async function createGatewayHarness({
     return { response, html, transaction, verifier, state };
   };
 
-  const submitLogin = async ({ transaction, accessKey = TEST_ACCESS_KEY } = {}) => {
+  const submitLogin = async ({ transaction, accessKey } = {}) => {
+    const form = new URLSearchParams({ transaction });
+    if (typeof accessKey === 'string') form.set('accessKey', accessKey);
     const response = await fetch(new URL('/login', baseUrl), {
       method: 'POST',
       redirect: 'manual',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ transaction, accessKey }),
+      body: form,
     });
     return { response, location: response.headers.get('location'), text: await response.text() };
   };

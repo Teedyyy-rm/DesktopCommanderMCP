@@ -37,7 +37,8 @@ async function run() {
 
     const failedLoginFlow = await harness.beginAuthorization({ clientId });
     assert.equal(failedLoginFlow.response.status, 200);
-    assert.match(failedLoginFlow.html, /name="accessKey"/);
+    assert.match(failedLoginFlow.html, /Continue to ChatGPT/);
+    assert.doesNotMatch(failedLoginFlow.html, /name="accessKey"/);
     assert.doesNotMatch(failedLoginFlow.html, /name="username"/);
     const failedLogin = await harness.submitLogin({
       transaction: failedLoginFlow.transaction,
@@ -47,12 +48,23 @@ async function run() {
     assert.match(failedLogin.text, /access key is incorrect/i);
     assert.match(failedLogin.text, /name="transaction"/);
 
+    const noExpiryFlow = await harness.beginAuthorization({ clientId });
+    assert.equal(noExpiryFlow.html.includes(TEST_ACCESS_KEY), false, 'the configured key must stay on the server');
+    const realDateNow = Date.now;
+    Date.now = () => realDateNow() + 11 * 60 * 1000;
+    try {
+      const defaultKeyLogin = await harness.submitLogin({ transaction: noExpiryFlow.transaction });
+      assert.equal(defaultKeyLogin.response.status, 303, 'the configured default key should work without browser entry after ten minutes');
+    } finally {
+      Date.now = realDateNow;
+    }
+
     const unknownTransaction = await harness.submitLogin({
       transaction: 'not-a-live-authorization-transaction',
       accessKey: TEST_ACCESS_KEY,
     });
-    assert.equal(unknownTransaction.response.status, 400, 'a correct key cannot revive an expired authorization transaction');
-    assert.match(unknownTransaction.text, /invalid or has expired/i);
+    assert.equal(unknownTransaction.response.status, 400, 'an unknown transaction must not be revived by the configured key');
+    assert.match(unknownTransaction.text, /no longer available/i);
 
     const authorization = failedLoginFlow;
     const login = await harness.submitLogin({ transaction: authorization.transaction, accessKey: TEST_ACCESS_KEY });
@@ -115,7 +127,7 @@ async function run() {
     });
     assert.equal(expiredAccessToken.status, 401, 'expired bearer token must be rejected on the MCP route');
 
-    console.log('✓ ChatGPT Web OAuth metadata, callback allowlist, access-key retry, PKCE, audience, scope and expiry checks passed');
+    console.log('✓ ChatGPT Web OAuth metadata, callback allowlist, default env key, non-expiring one-use login, PKCE, audience, scope and token expiry checks passed');
   } finally {
     await harness.close();
   }

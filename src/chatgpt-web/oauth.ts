@@ -28,7 +28,6 @@ export const CHATGPT_WEB_SCOPE = 'desktop-commander.full_access';
 export const CHATGPT_WEB_SCOPES = [CHATGPT_WEB_SCOPE];
 export const CHATGPT_WEB_RESOURCE_PATH = '/mcp';
 const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
-const LOGIN_TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_FAILURES = 10;
 const MAX_REGISTERED_CLIENTS = 32;
@@ -43,7 +42,6 @@ type LoginTransaction = {
   state?: string;
   scopes: string[];
   resource: string;
-  expiresAt: number;
 };
 
 type AuthorizationCode = {
@@ -172,8 +170,10 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     }
 
     this.pruneExpired();
-    if (this.loginTransactions.size >= MAX_PENDING_LOGINS) {
-      throw new AccessDeniedError('Too many authorization attempts are pending. Try again shortly.');
+    while (this.loginTransactions.size >= MAX_PENDING_LOGINS) {
+      const oldestTransactionKey = this.loginTransactions.keys().next().value;
+      if (oldestTransactionKey === undefined) break;
+      this.loginTransactions.delete(oldestTransactionKey);
     }
 
     const transaction = token();
@@ -184,7 +184,6 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       state: params.state,
       scopes,
       resource,
-      expiresAt: Date.now() + LOGIN_TRANSACTION_TTL_MS,
     });
 
     res.setHeader('Cache-Control', 'no-store');
@@ -196,15 +195,14 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Desktop Commander sign in</title>
 <body><main><h1>Sign in to Desktop Commander</h1>
-<p>Authorize your ChatGPT connection to use this self-hosted Desktop Commander server.</p>
-<form method="post" action="/login" autocomplete="off">
+<p>The gateway will use its configured single-user key to authorize this ChatGPT connection.</p>
+<form method="post" action="/login">
 <input type="hidden" name="transaction" value="${transaction}">
-<label>Access key <input name="accessKey" type="password" autocomplete="off" required autofocus></label>
-<button type="submit">Sign in</button></form></main></body></html>`);
+<button type="submit">Continue to ChatGPT</button></form></main></body></html>`);
   }
 
-  /** Validate the access key and consume the pending browser authorization. */
-  completeLogin(transaction: string, accessKey: string): LoginResult {
+  /** Use an explicitly supplied key or the private gateway key, then consume the one-use authorization. */
+  completeLogin(transaction: string, accessKey?: string): LoginResult {
     const now = Date.now();
     this.pruneExpired(now);
     if (now < this.loginLockedUntil) return { ok: false, status: 429 };
@@ -222,7 +220,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       this.loginLockedUntil = 0;
     }
 
-    const suppliedDigest = hashAccessKey(accessKey);
+    const suppliedDigest = accessKey ? hashAccessKey(accessKey) : this.accessKeyDigest;
     if (!timingSafeEqual(suppliedDigest, this.accessKeyDigest)) {
       this.failedLoginCount += 1;
       if (this.failedLoginCount >= MAX_LOGIN_FAILURES) {
@@ -391,9 +389,6 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   }
 
   private pruneExpired(now = Date.now()): void {
-    for (const [key, grant] of this.loginTransactions) {
-      if (grant.expiresAt <= now) this.loginTransactions.delete(key);
-    }
     for (const [key, grant] of this.authorizationCodes) {
       if (grant.expiresAt <= now) this.authorizationCodes.delete(key);
     }
