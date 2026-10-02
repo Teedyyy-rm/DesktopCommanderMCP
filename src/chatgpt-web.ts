@@ -66,7 +66,7 @@ export function runChatGptWebGenerateKey(): void {
   const envFilePath = writeChatGptWebAccessKey();
   process.stdout.write(
     `Generated a new ChatGPT Web access key in ${envFilePath}\n` +
-    'Copy the DC_CHATGPT_WEB_OAUTH_KEY value from that private file to sign in.\n' +
+    'The gateway uses this key automatically; no key entry in ChatGPT is needed.\n' +
     'Restart the gateway service to activate the new key.\n',
     () => process.exit(0),
   );

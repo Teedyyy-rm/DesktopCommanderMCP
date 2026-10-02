@@ -29,6 +29,8 @@ async function run() {
     const firstKey = /^DC_CHATGPT_WEB_OAUTH_KEY=([A-Za-z0-9_-]{43})$/m.exec(firstContents)?.[1];
     assert.ok(firstKey, 'the generated key should be written to the environment file');
     assert.doesNotMatch(first.stdout, new RegExp(firstKey), 'the generated key should not be printed to terminal output');
+    assert.match(first.stdout, /no key entry in ChatGPT is needed/i);
+    assert.doesNotMatch(first.stdout, /copy the DC_CHATGPT_WEB_OAUTH_KEY/i);
     assert.match(firstContents, /DC_CHATGPT_WEB_PUBLIC_URL=https:\/\/mcp\.example\.test/);
     assert.match(firstContents, /DC_CHATGPT_WEB_PORT=3000/);
     assert.doesNotMatch(firstContents, /DC_CHATGPT_WEB_OAUTH_(?:USERNAME|PASSWORD_HASH)=/);
