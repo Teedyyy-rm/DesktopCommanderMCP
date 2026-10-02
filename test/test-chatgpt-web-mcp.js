@@ -135,6 +135,69 @@ async function run() {
     for (const { client } of clients) await client.close().catch(() => undefined);
     await harness.close();
   }
+
+  let capacityChildStarts = 0;
+  let capacityChildCloses = 0;
+  const capacityHarness = await createGatewayHarness({
+    sessionIdleTimeoutMs: 30_000,
+    upstreamClientFactory: async () => {
+      capacityChildStarts += 1;
+      let closed = false;
+      return {
+        listTools: async () => ({
+          tools: [
+            { name: 'echo', description: 'Echo input', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+          ],
+        }),
+        callTool: async ({ arguments: args }) => ({ content: [{ type: 'text', text: `echo:${args?.text ?? ''}` }] }),
+        listResources: async () => ({ resources: [] }),
+        readResource: async () => ({ contents: [] }),
+        listResourceTemplates: async () => ({ resourceTemplates: [] }),
+        listPrompts: async () => ({ prompts: [] }),
+        getPrompt: async () => ({ messages: [] }),
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          capacityChildCloses += 1;
+        },
+      };
+    },
+  });
+  const capacityClients = [];
+  try {
+    const registration = await capacityHarness.registerClient();
+    const tokens = await capacityHarness.authorizeAndGetToken(registration.body.client_id);
+    const connectMcpClient = async () => {
+      const transport = new StreamableHTTPClientTransport(new URL('/mcp', capacityHarness.baseUrl), {
+        requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } },
+      });
+      const client = new Client({ name: 'mcp-capacity-test', version: '1.0.0' }, { capabilities: {} });
+      await client.connect(transport);
+      capacityClients.push({ client, transport });
+      return { client, transport };
+    };
+
+    const oldest = await connectMcpClient();
+    const nextOldest = await connectMcpClient();
+    await wait(10);
+    await oldest.client.listTools();
+    for (let index = 0; index < 14; index += 1) await connectMcpClient();
+    assert.equal(capacityChildStarts, 16, 'the gateway should admit its configured maximum session count');
+
+    const newest = await connectMcpClient();
+    assert.equal(capacityChildStarts, 17, 'a new MCP session should still be admitted at capacity');
+    assert.equal(capacityChildCloses, 1, 'admitting a session at capacity should close one idle child');
+    assert.equal((await oldest.client.callTool({ name: 'echo', arguments: { text: 'retained' } })).content[0].text, 'echo:retained', 'the recently used session should remain active');
+    await assert.rejects(() => nextOldest.client.listTools(), Error, 'the least recently used idle session should be evicted');
+    assert.deepEqual((await newest.client.listTools()).tools.map((tool) => tool.name), ['echo']);
+
+    await capacityHarness.close();
+    assert.equal(capacityChildCloses, capacityChildStarts, 'gateway shutdown should close every remaining child');
+    console.log('✓ MCP session-capacity admission evicts the least recently used idle child and retains active sessions');
+  } finally {
+    for (const { client } of capacityClients) await client.close().catch(() => undefined);
+    await capacityHarness.close();
+  }
 }
 
 run().catch((error) => {

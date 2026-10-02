@@ -46,6 +46,7 @@ interface ProxySession {
   frontServer: Server;
   transport: StreamableHTTPServerTransport;
   activeRequests: number;
+  lastActivityAt: number;
   closing: boolean;
   idleTimer?: NodeJS.Timeout;
 }
@@ -102,6 +103,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   const activeSessions = new Set<ProxySession>();
   const pendingSessionCreations = new Set<Promise<ProxySession>>();
   let pendingSessions = 0;
+  let admissionQueue = Promise.resolve();
   let shuttingDown = false;
   const publicUrl = new URL(options.publicUrl.href);
   const resourceUrl = new URL(CHATGPT_WEB_RESOURCE_PATH, publicUrl);
@@ -186,6 +188,13 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   // wildcard origin is safe here; possession of a scoped bearer token is still
   // required for every MCP request.
   app.use(CHATGPT_WEB_RESOURCE_PATH, (req, res, next) => {
+    if (req.method !== 'OPTIONS') {
+      res.once('finish', () => {
+        if (res.statusCode >= 400) {
+          console.error(`[ChatGPT Web MCP] ${req.method} /mcp completed with status=${res.statusCode}`);
+        }
+      });
+    }
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Accept, Authorization, Content-Type, Last-Event-ID, MCP-Protocol-Version, Mcp-Session-Id');
@@ -215,6 +224,35 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     }
   };
 
+  const reserveSessionSlot = async (): Promise<void> => {
+    let releaseAdmission!: () => void;
+    const previousAdmission = admissionQueue;
+    admissionQueue = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    await previousAdmission;
+
+    try {
+      if (shuttingDown) throw new Error('The gateway is shutting down.');
+      if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+        const oldestIdleSession = [...activeSessions]
+          .filter((session) => session.id !== undefined && !session.closing && session.activeRequests === 0)
+          .sort((left, right) => left.lastActivityAt - right.lastActivityAt)[0];
+
+        if (oldestIdleSession) {
+          console.info('[ChatGPT Web MCP] Evicting the least recently used idle session to admit a new session.');
+          await closeSession(oldestIdleSession);
+        }
+      }
+      if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+        throw new Error('The gateway has reached its active session limit.');
+      }
+      pendingSessions += 1;
+    } finally {
+      releaseAdmission();
+    }
+  };
+
   const scheduleIdleClose = (session: ProxySession): void => {
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session.closing || session.activeRequests > 0) return;
@@ -225,11 +263,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   };
 
   const createSession = async (clientId: string): Promise<ProxySession> => {
-    if (shuttingDown) throw new Error('The gateway is shutting down.');
-    if (sessions.size + pendingSessions >= MAX_SESSIONS) {
-      throw new Error('The gateway has reached its active session limit.');
-    }
-    pendingSessions += 1;
+    await reserveSessionSlot();
     let reservationReleased = false;
     const releaseReservation = () => {
       if (reservationReleased) return;
@@ -252,8 +286,15 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
 
       frontServer.setRequestHandler(ListToolsRequestSchema, async (request) =>
         upstream!.listTools(request.params));
-      frontServer.setRequestHandler(CallToolRequestSchema, async (request) =>
-        upstream!.callTool(request.params));
+      frontServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+        try {
+          return await upstream!.callTool(request.params);
+        } catch (error) {
+          const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+          console.error(`[ChatGPT Web MCP] Upstream tool ${request.params.name} failed: ${details}`);
+          throw error;
+        }
+      });
       frontServer.setRequestHandler(ListResourcesRequestSchema, async (request) =>
         upstream!.listResources(request.params));
       frontServer.setRequestHandler(ReadResourceRequestSchema, async (request) =>
@@ -284,6 +325,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
         frontServer,
         transport,
         activeRequests: 0,
+        lastActivityAt: Date.now(),
         closing: false,
       };
       activeSessions.add(session);
@@ -332,7 +374,9 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     } else if (req.method === 'POST' && isInitializeRequest(req.body)) {
       try {
         session = await createTrackedSession(authInfo.clientId);
-      } catch {
+      } catch (error) {
+        const details = error instanceof Error ? error.message : String(error);
+        console.error(`[ChatGPT Web MCP] Local Desktop Commander session startup failed: ${details}`);
         jsonError(res, 503, 'session_unavailable', 'A local Desktop Commander session could not be started.');
         return;
       }
@@ -341,6 +385,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       return;
     }
 
+    session.lastActivityAt = Date.now();
     const isActiveRequest = req.method === 'POST';
     if (isActiveRequest) {
       session.activeRequests += 1;
@@ -352,7 +397,9 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     }
     try {
       await session.transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
-    } catch {
+    } catch (error) {
+      const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      console.error(`[ChatGPT Web MCP] MCP request failed: ${details}`);
       if (!res.headersSent) jsonError(res, 502, 'upstream_error', 'The local Desktop Commander session failed.');
     } finally {
       if (isActiveRequest) {
