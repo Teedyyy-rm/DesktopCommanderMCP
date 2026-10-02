@@ -79,7 +79,7 @@ systemctl --user is-active desktop-commander-chatgpt-web.service
 curl -fsS http://127.0.0.1:3000/healthz
 ```
 
-`/healthz` chỉ xác nhận tiến trình gateway phản hồi HTTP; một dòng `tool_call completed ... status=ok` sau thao tác thực tế mới xác nhận đường gọi từ ChatGPT qua gateway tới tool hoạt động end-to-end.
+`/healthz` chỉ xác nhận tiến trình gateway phản hồi HTTP; cặp dòng `🔧 Received tool call ...` và `✅ Tool call ... completed` sau thao tác thực tế xác nhận lệnh đã đi qua gateway tới tiến trình Desktop Commander local. Nếu chỉ thấy dòng nhận lệnh nhưng không thấy hoàn tất, xem dòng lỗi ngay sau đó để tìm nguyên nhân.
 
 ## Cấu hình HTTPS ingress
 
