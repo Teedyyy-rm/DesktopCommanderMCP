@@ -1,10 +1,45 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { CHATGPT_WEB_SCOPE } from '../dist/chatgpt-web/oauth.js';
 import { createGatewayHarness, REDIRECT_URI, RESOURCE_URL, TEST_ACCESS_KEY } from './chatgpt-web-test-helpers.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function verifyClientRegistrationSurvivesRestart() {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'dc-chatgpt-web-clients-'));
+  const clientStorePath = path.join(tempDir, 'oauth-clients.json');
+  let firstGateway;
+  let restartedGateway;
+
+  try {
+    firstGateway = await createGatewayHarness({ clientStorePath });
+    const registration = await firstGateway.registerClient();
+    assert.equal(registration.response.status, 201);
+    const clientId = registration.body.client_id;
+    await firstGateway.close();
+    firstGateway = undefined;
+
+    const storeMode = (await stat(clientStorePath)).mode & 0o777;
+    assert.equal(storeMode, 0o600, 'persisted OAuth client metadata should be private to the gateway user');
+    const storedClients = JSON.parse(await readFile(clientStorePath, 'utf8'));
+    assert.equal(storedClients.length, 1);
+    assert.equal(storedClients[0].client_id, clientId);
+
+    restartedGateway = await createGatewayHarness({ clientStorePath });
+    const resumedAuthorization = await restartedGateway.beginAuthorization({ clientId });
+    assert.equal(resumedAuthorization.response.status, 200, 'the previous DCR client should remain valid after a gateway restart');
+    assert.ok(resumedAuthorization.transaction);
+  } finally {
+    await firstGateway?.close();
+    await restartedGateway?.close();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function run() {
+  await verifyClientRegistrationSurvivesRestart();
   const harness = await createGatewayHarness({ accessTokenTtlSeconds: 1 });
   try {
     const protectedResource = await harness.requestJson('/.well-known/oauth-protected-resource/mcp');
@@ -127,7 +162,7 @@ async function run() {
     });
     assert.equal(expiredAccessToken.status, 401, 'expired bearer token must be rejected on the MCP route');
 
-    console.log('✓ ChatGPT Web OAuth metadata, callback allowlist, default env key, non-expiring one-use login, PKCE, audience, scope and token expiry checks passed');
+    console.log('✓ ChatGPT Web OAuth metadata, persistent DCR clients, callback allowlist, default env key, non-expiring one-use login, PKCE, audience, scope and token expiry checks passed');
   } finally {
     await harness.close();
   }

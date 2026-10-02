@@ -40,6 +40,7 @@ Cấu hình các biến môi trường sau trong môi trường dịch vụ củ
 | `DC_CHATGPT_WEB_PUBLIC_URL` | Có | Origin HTTPS công khai, ví dụ `https://mcp.example.com` (không kèm `/mcp`) |
 | `DC_CHATGPT_WEB_OAUTH_KEY` | Có | Key ngẫu nhiên do lệnh `generate-key` tạo |
 | `DC_CHATGPT_WEB_PORT` | Không | Cổng loopback; mặc định `3000` |
+| `DC_CHATGPT_WEB_CLIENTS_FILE` | Không | File JSON lưu đăng ký OAuth DCR; mặc định `~/.config/desktop-commander/chatgpt-web-oauth-clients.json` |
 
 Chạy bằng bản build trong checkout:
 
@@ -53,7 +54,7 @@ Sau khi tính năng được phát hành trong npm package, lệnh tương đư�
 desktop-commander chatgpt-web
 ```
 
-Gateway in ra địa chỉ loopback và URL công khai dự kiến. Mỗi phiên tạo một stdio worker; gateway nhận tối đa 16 phiên đồng thời và đóng phiên không hoạt động sau 30 phút. OAuth client, mã xác thực, access token, refresh token và session MCP hiện được lưu trong bộ nhớ; khởi động lại gateway sẽ yêu cầu ChatGPT đăng ký/kết nối lại hoặc xác thực lại. Chạy một gateway instance cho mỗi URL vì session không được chia sẻ giữa nhiều tiến trình.
+Gateway in ra địa chỉ loopback và URL công khai dự kiến. Mỗi phiên tạo một stdio worker; gateway nhận tối đa 16 phiên đồng thời và đóng phiên không hoạt động sau 30 phút. Thông tin đăng ký OAuth DCR được lưu riêng trên đĩa với quyền `600`, để `client_id` do ChatGPT cấp vẫn dùng được sau khi gateway khởi động lại. Mã xác thực, access token, refresh token và session MCP vẫn chỉ nằm trong bộ nhớ; sau restart, ChatGPT cần bắt đầu authorization flow mới. Chạy một gateway instance cho mỗi URL vì session không được chia sẻ giữa nhiều tiến trình.
 
 ## Cấu hình HTTPS ingress
 
@@ -88,7 +89,7 @@ location / {
 
 Tham khảo hướng dẫn OpenAI: [Build an MCP server](https://developers.openai.com/plugins/build/mcp-server), [Authentication](https://developers.openai.com/plugins/build/auth), và [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
-Deployment hiện tại dùng DNS và HTTPS ingress tại `https://mcp.omniislabs.io.vn`; metadata OAuth công khai đã được kiểm tra. Mỗi lần gateway khởi động lại, hãy bắt đầu một luồng ủy quyền OAuth mới vì client, transaction và token được lưu trong bộ nhớ. Các deployment khác cần cấu hình DNS và HTTPS ingress riêng.
+Deployment hiện tại dùng DNS và HTTPS ingress tại `https://mcp.omniislabs.io.vn`; metadata OAuth công khai đã được kiểm tra. Đăng ký client được giữ qua restart; mỗi lần gateway khởi động lại, hãy bắt đầu một luồng ủy quyền OAuth mới vì transaction và token đang hoạt động vẫn được lưu trong bộ nhớ. Các deployment khác cần cấu hình DNS và HTTPS ingress riêng.
 
 ## Quyền truy cập
 

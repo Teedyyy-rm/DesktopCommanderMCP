@@ -12,10 +12,12 @@ export async function createGatewayHarness({
   upstreamClientFactory,
   accessTokenTtlSeconds = 60,
   sessionIdleTimeoutMs = 30_000,
+  clientStorePath = null,
 } = {}) {
   const oauthProvider = new ChatGptWebOAuthProvider({
     accessKey: TEST_ACCESS_KEY,
     resourceUrl: RESOURCE_URL,
+    clientStorePath,
     accessTokenTtlSeconds,
   });
   const gateway = await startChatGptWebGateway({

@@ -3,6 +3,20 @@ import {
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import type { Response } from 'express';
 import type {
   OAuthServerProvider,
@@ -69,6 +83,8 @@ type LoginResult =
 export interface ChatGptWebOAuthOptions {
   accessKey: string;
   resourceUrl: URL;
+  /** Set to null to disable persisted DCR clients (for isolated tests). */
+  clientStorePath?: string | null;
   accessTokenTtlSeconds?: number;
   refreshTokenTtlSeconds?: number;
 }
@@ -113,6 +129,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
   private readonly accessKeyDigest: Buffer;
   private readonly resourceUrl: string;
+  private readonly clientStorePath: string | null;
   private readonly accessTokenTtlSeconds: number;
   private readonly refreshTokenTtlSeconds: number;
   private readonly clients = new Map<string, OAuthClientInformationFull>();
@@ -135,8 +152,13 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
 
     this.accessKeyDigest = hashAccessKey(options.accessKey);
     this.resourceUrl = options.resourceUrl.href;
+    this.clientStorePath = options.clientStorePath === null
+      ? null
+      : resolve(options.clientStorePath ?? process.env.DC_CHATGPT_WEB_CLIENTS_FILE ??
+        join(homedir(), '.config', 'desktop-commander', 'chatgpt-web-oauth-clients.json'));
     this.accessTokenTtlSeconds = options.accessTokenTtlSeconds ?? 60 * 60;
     this.refreshTokenTtlSeconds = options.refreshTokenTtlSeconds ?? 30 * 24 * 60 * 60;
+    this.loadClients();
 
     this.clientsStore = {
       getClient: (clientId) => this.clients.get(clientId),
@@ -345,7 +367,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       throw new InvalidClientMetadataError('Only ChatGPT Web public clients using the registered HTTPS callback are accepted.');
     }
     if (this.clients.size >= MAX_REGISTERED_CLIENTS) {
-      throw new InvalidClientMetadataError('The in-memory client registration limit has been reached. Restart the gateway to clear it.');
+      throw new InvalidClientMetadataError('The registered client limit has been reached.');
     }
 
     const fullClient = client as OAuthClientInformationFull;
@@ -353,7 +375,88 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       throw new InvalidClientMetadataError('The authorization server did not assign a client id.');
     }
     this.clients.set(fullClient.client_id, fullClient);
+    try {
+      this.persistClients();
+    } catch (error) {
+      this.clients.delete(fullClient.client_id);
+      throw error;
+    }
     return fullClient;
+  }
+
+  private loadClients(): void {
+    if (!this.clientStorePath) return;
+
+    let records: unknown;
+    try {
+      const stat = lstatSync(this.clientStorePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error('The OAuth client store must be a regular file, not a symlink.');
+      }
+      chmodSync(this.clientStorePath, 0o600);
+      records = JSON.parse(readFileSync(this.clientStorePath, 'utf8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new Error('Could not load the persisted ChatGPT OAuth client registrations.');
+    }
+
+    if (!Array.isArray(records) || records.length > MAX_REGISTERED_CLIENTS) {
+      throw new Error('The persisted ChatGPT OAuth client registrations are invalid.');
+    }
+    for (const record of records) {
+      if (!this.isPersistableClient(record)) {
+        throw new Error('The persisted ChatGPT OAuth client registrations are invalid.');
+      }
+      this.clients.set(record.client_id, record);
+    }
+  }
+
+  private isPersistableClient(value: unknown): value is OAuthClientInformationFull {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const client = value as Partial<OAuthClientInformationFull>;
+    if (client.scope !== undefined && typeof client.scope !== 'string') return false;
+    const scopes = client.scope?.split(/\s+/).filter(Boolean) ?? [];
+    return typeof client.client_id === 'string' && client.client_id.length > 0 && client.client_id.length <= 512 &&
+      (client.client_id_issued_at === undefined || Number.isFinite(client.client_id_issued_at)) &&
+      client.token_endpoint_auth_method === 'none' && Array.isArray(client.redirect_uris) && client.redirect_uris.length > 0 &&
+      client.redirect_uris.every((uri) => typeof uri === 'string' && isAllowedChatGptRedirectUri(uri)) &&
+      scopes.every((scope) => scope === CHATGPT_WEB_SCOPE) &&
+      (client.grant_types === undefined || (Array.isArray(client.grant_types) && client.grant_types.every((grant) => ['authorization_code', 'refresh_token'].includes(grant)))) &&
+      (client.response_types === undefined || (Array.isArray(client.response_types) && client.response_types.every((type) => type === 'code')));
+  }
+
+  private persistClients(): void {
+    if (!this.clientStorePath) return;
+    const directory = dirname(this.clientStorePath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try {
+      const current = lstatSync(this.clientStorePath);
+      if (current.isSymbolicLink() || !current.isFile()) {
+        throw new Error('The OAuth client store must be a regular file, not a symlink.');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    const temporaryPath = `${this.clientStorePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+    const fd = openSync(temporaryPath, 'wx', 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify([...this.clients.values()], null, 2)}\n`, 'utf8');
+      fsyncSync(fd);
+      closeSync(fd);
+    } catch (error) {
+      try { closeSync(fd); } catch { /* already closed */ }
+      try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+      throw error;
+    }
+
+    try {
+      renameSync(temporaryPath, this.clientStorePath);
+      chmodSync(this.clientStorePath, 0o600);
+    } catch (error) {
+      try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+      throw error;
+    }
   }
 
   private issueTokens(clientId: string, scopes: string[], resource: string): OAuthTokens {
