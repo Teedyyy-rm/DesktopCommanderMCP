@@ -42,6 +42,7 @@ export const CHATGPT_WEB_SCOPE = 'desktop-commander.full_access';
 export const CHATGPT_WEB_SCOPES = [CHATGPT_WEB_SCOPE];
 export const CHATGPT_WEB_RESOURCE_PATH = '/mcp';
 const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
+const MAX_COMPLETED_LOGIN_REPLAYS = 256;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_FAILURES = 10;
 const MAX_REGISTERED_CLIENTS = 32;
@@ -64,7 +65,14 @@ type AuthorizationCode = {
   codeChallenge: string;
   scopes: string[];
   resource: string;
+  loginTransactionKey: string;
   expiresAt: number;
+};
+
+type CompletedLogin = {
+  redirectUrl: string;
+  expiresAt: number;
+  authorizationCodeExchanged: boolean;
 };
 
 type TokenRecord = {
@@ -78,6 +86,7 @@ type TokenRecord = {
 
 type LoginResult =
   | { ok: true; redirectUrl: string }
+  | { ok: true; alreadyCompleted: true }
   | { ok: false; status: 400 | 401 | 429 };
 
 export interface ChatGptWebOAuthOptions {
@@ -134,6 +143,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   private readonly refreshTokenTtlSeconds: number;
   private readonly clients = new Map<string, OAuthClientInformationFull>();
   private readonly loginTransactions = new Map<string, LoginTransaction>();
+  private readonly completedLogins = new Map<string, CompletedLogin>();
   private readonly authorizationCodes = new Map<string, AuthorizationCode>();
   private readonly accessTokens = new Map<string, TokenRecord>();
   private readonly refreshTokens = new Map<string, TokenRecord>();
@@ -212,7 +222,9 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    // OAuth completes with a cross-origin redirect back to ChatGPT. Chromium
+    // can block that redirect when the initiating form's CSP only allows self.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; base-uri 'none'; frame-ancestors 'none'");
     res.status(200).type('html').send(`<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Desktop Commander sign in</title>
@@ -230,6 +242,13 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     if (now < this.loginLockedUntil) return { ok: false, status: 429 };
 
     const transactionKey = sha256(transaction);
+    const completed = this.completedLogins.get(transactionKey);
+    if (completed && completed.expiresAt > now) {
+      return completed.authorizationCodeExchanged
+        ? { ok: true, alreadyCompleted: true }
+        : { ok: true, redirectUrl: completed.redirectUrl };
+    }
+
     const pending = this.loginTransactions.get(transactionKey);
     if (!pending) return { ok: false, status: 400 };
     if (this.authorizationCodes.size >= MAX_AUTHORIZATION_CODES) {
@@ -255,18 +274,31 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     this.failedLoginCount = 0;
     this.loginWindowStartedAt = now;
     const authorizationCode = token();
-    this.authorizationCodes.set(sha256(authorizationCode), {
+    const authorizationCodeHash = sha256(authorizationCode);
+    const expiresAt = now + AUTHORIZATION_CODE_TTL_MS;
+    this.authorizationCodes.set(authorizationCodeHash, {
       clientId: pending.clientId,
       redirectUri: pending.redirectUri,
       codeChallenge: pending.codeChallenge,
       scopes: pending.scopes,
       resource: pending.resource,
-      expiresAt: now + AUTHORIZATION_CODE_TTL_MS,
+      loginTransactionKey: transactionKey,
+      expiresAt,
     });
 
     const redirect = new URL(pending.redirectUri);
     redirect.searchParams.set('code', authorizationCode);
     if (pending.state) redirect.searchParams.set('state', pending.state);
+    while (this.completedLogins.size >= MAX_COMPLETED_LOGIN_REPLAYS) {
+      const oldestCompletedKey = this.completedLogins.keys().next().value;
+      if (oldestCompletedKey === undefined) break;
+      this.completedLogins.delete(oldestCompletedKey);
+    }
+    this.completedLogins.set(transactionKey, {
+      redirectUrl: redirect.href,
+      expiresAt,
+      authorizationCodeExchanged: false,
+    });
     return { ok: true, redirectUrl: redirect.href };
   }
 
@@ -295,8 +327,11 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       grant.redirectUri !== redirectUri || grant.resource !== resource?.href) {
       throw new InvalidGrantError('The authorization code is invalid, expired, or bound to another request.');
     }
+    const tokens = this.issueTokens(client.client_id, grant.scopes, grant.resource);
     this.authorizationCodes.delete(codeHash);
-    return this.issueTokens(client.client_id, grant.scopes, grant.resource);
+    const completed = this.completedLogins.get(grant.loginTransactionKey);
+    if (completed) completed.authorizationCodeExchanged = true;
+    return tokens;
   }
 
   async exchangeRefreshToken(
@@ -492,6 +527,9 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   }
 
   private pruneExpired(now = Date.now()): void {
+    for (const [key, completed] of this.completedLogins) {
+      if (completed.expiresAt <= now) this.completedLogins.delete(key);
+    }
     for (const [key, grant] of this.authorizationCodes) {
       if (grant.expiresAt <= now) this.authorizationCodes.delete(key);
     }

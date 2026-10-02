@@ -15,7 +15,7 @@ Gateway chỉ bind `127.0.0.1`. Domain, chứng chỉ TLS và reverse proxy nằ
 
 Không cần nhập key trong trình duyệt. Gateway đọc `DC_CHATGPT_WEB_OAUTH_KEY` từ môi trường riêng của service và dùng key đã cấu hình làm mặc định khi hoàn tất OAuth. Giá trị key không được đưa vào HTML. Trang xác thực chỉ cần bấm **Continue to ChatGPT**.
 
-Giao dịch đăng nhập chờ không còn hết hạn sau 10 phút. Mỗi giao dịch chỉ dùng được một lần; nếu có hơn 128 giao dịch cùng chờ, gateway loại giao dịch cũ nhất. Khởi động lại gateway vẫn xóa trạng thái OAuth đang giữ trong bộ nhớ, vì vậy hãy bắt đầu kết nối mới sau khi restart. Thời hạn access/refresh token là thiết lập riêng và không bị thay đổi bởi thời hạn giao dịch đăng nhập.
+Giao dịch đăng nhập chờ không còn hết hạn sau 10 phút. Gateway chấp nhận gửi lại cùng một giao dịch sau khi đã hoàn tất: trước khi authorization code được đổi, nó trả lại cùng callback/code; sau khi đổi, nó báo rằng authorization đã hoàn tất. Authorization code vẫn dùng một lần, ràng buộc PKCE và có hạn 5 phút. Nếu có hơn 128 giao dịch cùng chờ, gateway loại giao dịch cũ nhất. Khởi động lại gateway vẫn xóa trạng thái OAuth đang giữ trong bộ nhớ, vì vậy hãy bắt đầu kết nối mới sau khi restart. Thời hạn access/refresh token là thiết lập riêng và không bị thay đổi bởi thời hạn giao dịch đăng nhập.
 
 OAuth vẫn cấp bearer token và gateway kiểm tra token trên từng yêu cầu MCP. Vì gateway tự hoàn tất đăng nhập bằng key đã cấu hình, người nào biết URL và tự thêm connector ChatGPT có thể lấy quyền gọi tools; chỉ dùng chế độ này cho connector cá nhân và giữ kín endpoint. Các tools chạy dưới quyền hệ điều hành của máy này.
 

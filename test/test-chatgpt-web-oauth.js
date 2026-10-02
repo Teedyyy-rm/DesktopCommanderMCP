@@ -72,6 +72,11 @@ async function run() {
 
     const failedLoginFlow = await harness.beginAuthorization({ clientId });
     assert.equal(failedLoginFlow.response.status, 200);
+    assert.match(
+      failedLoginFlow.response.headers.get('content-security-policy'),
+      /form-action 'self' https:\/\/chatgpt\.com/,
+      'the sign-in form must allow its OAuth redirect to ChatGPT',
+    );
     assert.match(failedLoginFlow.html, /Continue to ChatGPT/);
     assert.doesNotMatch(failedLoginFlow.html, /name="accessKey"/);
     assert.doesNotMatch(failedLoginFlow.html, /name="username"/);
@@ -104,6 +109,9 @@ async function run() {
     const authorization = failedLoginFlow;
     const login = await harness.submitLogin({ transaction: authorization.transaction, accessKey: TEST_ACCESS_KEY });
     assert.equal(login.response.status, 303);
+    const replayedLogin = await harness.submitLogin({ transaction: authorization.transaction, accessKey: TEST_ACCESS_KEY });
+    assert.equal(replayedLogin.response.status, 303, 'a repeated login submission should reuse the same callback during PKCE exchange');
+    assert.equal(replayedLogin.location, login.location, 'a repeated login must not mint another authorization code');
     const redirect = new URL(login.location);
     assert.equal(redirect.origin + redirect.pathname, new URL(REDIRECT_URI).origin + new URL(REDIRECT_URI).pathname);
     assert.equal(redirect.searchParams.get('state'), authorization.state);
@@ -133,6 +141,10 @@ async function run() {
     assert.equal(tokenResult.body.scope, CHATGPT_WEB_SCOPE);
     assert.ok(tokenResult.body.access_token);
     assert.ok(tokenResult.body.refresh_token);
+
+    const completedLoginReplay = await harness.submitLogin({ transaction: authorization.transaction, accessKey: TEST_ACCESS_KEY });
+    assert.equal(completedLoginReplay.response.status, 200, 'a repeated login after code exchange should report completion rather than fail as stale');
+    assert.match(completedLoginReplay.text, /Authorization already completed/i);
 
     const missingBearer = await fetch(new URL('/mcp', harness.baseUrl));
     assert.equal(missingBearer.status, 401);

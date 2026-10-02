@@ -124,6 +124,14 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     next();
   });
   app.use(express.urlencoded({ extended: false, limit: '8kb' }));
+  app.use((req, res, next) => {
+    const requestPath = req.path;
+    if (!['/authorize', '/login', '/token', '/register', '/revoke'].includes(requestPath)) return next();
+    res.once('finish', () => {
+      console.info(`[ChatGPT Web OAuth] ${req.method} ${requestPath} completed with status=${res.statusCode}`);
+    });
+    next();
+  });
   app.use(mcpAuthRouter({
     provider: options.oauthProvider,
     issuerUrl: publicUrl,
@@ -156,6 +164,14 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       return;
     }
     res.setHeader('Cache-Control', 'no-store');
+    if ('alreadyCompleted' in result) {
+      console.info('[ChatGPT Web OAuth] Replayed login submission acknowledged after token exchange.');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+      res.status(200).type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><title>Desktop Commander connected</title><body><h1>Authorization already completed</h1><p>Return to ChatGPT to continue using Desktop Commander.</p></body></html>');
+      return;
+    }
+    console.info('[ChatGPT Web OAuth] Login accepted; redirecting to the ChatGPT callback.');
     res.redirect(303, result.redirectUrl);
   });
 
