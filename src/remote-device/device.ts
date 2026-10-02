@@ -53,7 +53,10 @@ export class MCPDevice {
     private seenCallIds: Set<string> = new Set();
 
     constructor(options: MCPDeviceOptions = {}) {
-        this.baseServerUrl = process.env.MCP_SERVER_URL || 'https://mcp.desktopcommander.app';
+        // Do not silently pair a local device with a vendor-hosted service.
+        // Remote Device mode is opt-in and requires an explicitly configured
+        // compatible endpoint.
+        this.baseServerUrl = process.env.MCP_SERVER_URL?.trim() || '';
         this.remoteChannel = new RemoteChannel();
         this.deviceId = undefined;
         this.isShuttingDown = false;
@@ -133,6 +136,10 @@ export class MCPDevice {
     }
 
     async start() {
+        if (!this.baseServerUrl) {
+            throw new Error('MCP_SERVER_URL must be set explicitly; no remote server is selected by default.');
+        }
+
         try {
             console.log('🚀 Starting MCP Device...');
             if (process.env.DEBUG_MODE === 'true') {
@@ -413,6 +420,10 @@ export class MCPDevice {
     }
 
     async fetchSupabaseConfig() {
+        if (!this.baseServerUrl) {
+            throw new Error('MCP_SERVER_URL must be set explicitly; no remote server is selected by default.');
+        }
+
         // No auth header needed for this public endpoint
         console.debug('[DEBUG] Fetching Supabase config from:', `${this.baseServerUrl}/api/mcp-info`);
         const response = await fetch(`${this.baseServerUrl}/api/mcp-info`);

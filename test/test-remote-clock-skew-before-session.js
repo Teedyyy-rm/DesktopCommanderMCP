@@ -48,14 +48,16 @@ const SERVER_AHEAD_MS = 3 * 60 * 60 * 1000;
 
 /** Slack for the round trip between reading Date.now() and comparing it. */
 const TOLERANCE_MS = 60 * 1000;
+let receivedRequests = 0;
 
 /**
- * A stand-in for mcp.desktopcommander.app that answers the three startup hops
+ * A stand-in Remote MCP server that answers the three startup hops
  * and stamps every response with a `Date` header three hours ahead of this
  * machine — the shape of a device whose own clock lags.
  */
 function startServer() {
     const server = http.createServer((req, res) => {
+        receivedRequests++;
         res.setHeader('Date', new Date(Date.now() + SERVER_AHEAD_MS).toUTCString());
         res.setHeader('Content-Type', 'application/json');
 
@@ -129,6 +131,34 @@ process.env.MCP_SERVER_URL = url;
 // Imported after MCP_SERVER_URL is set: MCPDevice reads it in its constructor.
 const { MCPDevice } = await import('../dist/remote-device/device.js');
 const { DeviceAuthenticator } = await import('../dist/remote-device/device-authenticator.js');
+
+await test('Remote Device refuses to select a hosted endpoint when MCP_SERVER_URL is unset', async () => {
+    const configuredUrl = process.env.MCP_SERVER_URL;
+    const requestsBefore = receivedRequests;
+    delete process.env.MCP_SERVER_URL;
+    try {
+        const device = new MCPDevice();
+        let initializedLocalMcp = false;
+        device.desktop.initialize = async () => {
+            initializedLocalMcp = true;
+        };
+        await assert.rejects(
+            () => device.start(),
+            /MCP_SERVER_URL must be set explicitly/,
+            'startup must fail before initializing the local worker'
+        );
+        await assert.rejects(
+            () => device.fetchSupabaseConfig(),
+            /MCP_SERVER_URL must be set explicitly/,
+            'missing configuration must fail before issuing an HTTP request'
+        );
+        assert.equal(initializedLocalMcp, false, 'the local worker should not be started without a destination');
+        assert.equal(receivedRequests, requestsBefore, 'no request should reach the test Remote MCP server');
+    } finally {
+        if (configuredUrl === undefined) delete process.env.MCP_SERVER_URL;
+        else process.env.MCP_SERVER_URL = configuredUrl;
+    }
+});
 
 await test('fetchSupabaseConfig() corrects a skewed clock from the response Date', async () => {
     const device = new MCPDevice();

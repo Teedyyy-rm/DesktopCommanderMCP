@@ -39,7 +39,7 @@ Execute long-running terminal commands on your computer and manage processes thr
 
 ## Features
 
-- **Remote AI Control** - Use Desktop Commander from ChatGPT, Claude web, and other AI services via [Remote MCP](https://mcp.desktopcommander.app)
+- **Remote AI Control** - Use Desktop Commander from web AI clients through a compatible Remote MCP service that you configure explicitly
 - **File Preview UI** - Visual file previews in Claude Desktop with rendered markdown, inline images, expandable content, built-in markdown editor, and quick "Open in folder" access
 - **Enhanced terminal commands with interactive process control**
 - **Execute code in memory (Python, Node.js, R) without saving files**
@@ -465,7 +465,7 @@ Start the Remote Device:
 npx @wonderwhy-er/desktop-commander@latest remote
 ```
 
-On first run, complete browser authentication, then connect your AI at **[mcp.desktopcommander.app](https://mcp.desktopcommander.app)**.
+Remote Device mode has no default service endpoint. Set `MCP_SERVER_URL` to a compatible Remote MCP service that you operate before starting it; the command will not select or contact a hosted service automatically.
 
 - Stop the local device temporarily with `Ctrl+C`
 - See available CLI options with `npx @wonderwhy-er/desktop-commander@latest remote --help`

@@ -1,13 +1,13 @@
 # Desktop Commander Remote MCP
 
-Desktop Commander Remote MCP lets web-based AI clients such as **ChatGPT** and **Claude** use Desktop Commander tools on your computer. The Remote Device is a local process that connects your machine to the Desktop Commander Remote MCP service; commands still execute locally under your user account.
+Desktop Commander Remote MCP lets web-based AI clients such as **ChatGPT** and **Claude** use Desktop Commander tools on your computer. The Remote Device is a local process that connects your machine to a compatible Remote MCP service you configure; commands still execute locally under your user account. No hosted service is selected by default.
 
 ## Quick start
 
 ### Prerequisites
 
 - Node.js 18 or newer
-- A Desktop Commander account
+- A compatible Remote MCP service that you operate
 - An AI client that can connect to the Desktop Commander Remote MCP
 
 ### 1. Start the Remote Device
@@ -15,6 +15,7 @@ Desktop Commander Remote MCP lets web-based AI clients such as **ChatGPT** and *
 The recommended command is:
 
 ```bash
+export MCP_SERVER_URL="https://your-remote-mcp.example"
 npx @wonderwhy-er/desktop-commander@latest remote
 ```
 
@@ -45,7 +46,7 @@ On POSIX systems, the file is created with mode `0600` (read/write for the ownin
 
 ### 3. Connect your AI
 
-Open **[mcp.desktopcommander.app](https://mcp.desktopcommander.app)** and follow the connection instructions for your AI client. Once both the AI connection and the local Remote Device are active, the AI can use Desktop Commander tools on your computer.
+Configure your AI client to use the same Remote MCP service. Once both the AI connection and the local Remote Device are active, the AI can use Desktop Commander tools on your computer.
 
 ### 4. Keep the Remote Device running
 

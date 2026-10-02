@@ -1,6 +1,6 @@
 # Tự host Desktop Commander MCP cho ChatGPT Web
 
-Chế độ `chatgpt-web` chạy một gateway MCP trên máy này. ChatGPT Web kết nối vào gateway qua HTTPS; gateway tạo một tiến trình Desktop Commander `stdio` riêng cho mỗi phiên MCP. Chế độ này không dùng Remote Desktop Commander, dashboard `mcp.desktopcommander.app`, hay lệnh `remote`.
+Chế độ `chatgpt-web` chạy một gateway MCP trên máy này. ChatGPT Web kết nối vào gateway qua HTTPS; gateway tạo một tiến trình Desktop Commander `stdio` riêng cho mỗi phiên MCP. Chế độ này không dùng dịch vụ Remote MCP được lưu trữ bên ngoài hay lệnh `remote`.
 
 ## Yêu cầu
 

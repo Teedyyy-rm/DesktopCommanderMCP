@@ -39,6 +39,8 @@ Examples:
   npx @wonderwhy-er/desktop-commander@latest remote --logout
 
 Note:
+  MCP_SERVER_URL must point to a compatible server you configured; no remote
+  service is selected automatically.
   --logout removes local credentials only. Revoke the device in the Remote MCP
   dashboard if you also want to invalidate its server-side authorization.`);
         return;
@@ -55,6 +57,13 @@ Note:
         }
         return;
     }
+
+    if (!process.env.MCP_SERVER_URL?.trim()) {
+        console.error('Set MCP_SERVER_URL to a compatible server before starting Remote Device mode.');
+        process.exitCode = 1;
+        return;
+    }
+
     printRemoteHeader();
 
     // --persist-session is kept as an accepted no-op so existing invocations
