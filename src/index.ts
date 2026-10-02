@@ -14,7 +14,7 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
-import { runChatGptWeb, runChatGptWebPasswordHash } from './chatgpt-web.js';
+import { runChatGptWeb, runChatGptWebGenerateKey } from './chatgpt-web.js';
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -38,10 +38,12 @@ async function runServer() {
 
     // Run a self-hosted Streamable HTTP MCP gateway for ChatGPT Web.
     if (process.argv[2] === 'chatgpt-web') {
-      if (process.argv[3] === 'hash-password') {
-        await runChatGptWebPasswordHash();
-      } else {
+      if (process.argv[3] === 'generate-key') {
+        runChatGptWebGenerateKey();
+      } else if (process.argv[3] === undefined) {
         await runChatGptWeb();
+      } else {
+        throw new Error('Use `desktop-commander chatgpt-web generate-key` to create the gateway access key.');
       }
       return;
     }

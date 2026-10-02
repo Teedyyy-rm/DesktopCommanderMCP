@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { CHATGPT_WEB_SCOPE } from '../dist/chatgpt-web/oauth.js';
-import { createGatewayHarness, REDIRECT_URI, RESOURCE_URL, TEST_PASSWORD, TEST_USERNAME } from './chatgpt-web-test-helpers.js';
+import { createGatewayHarness, REDIRECT_URI, RESOURCE_URL, TEST_ACCESS_KEY } from './chatgpt-web-test-helpers.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -37,17 +37,25 @@ async function run() {
 
     const failedLoginFlow = await harness.beginAuthorization({ clientId });
     assert.equal(failedLoginFlow.response.status, 200);
+    assert.match(failedLoginFlow.html, /name="accessKey"/);
+    assert.doesNotMatch(failedLoginFlow.html, /name="username"/);
     const failedLogin = await harness.submitLogin({
       transaction: failedLoginFlow.transaction,
-      username: TEST_USERNAME,
-      password: 'wrong-password',
+      accessKey: 'wrong-key',
     });
-    assert.equal(failedLogin.response.status, 401, 'incorrect single-user credentials must be rejected');
-    assert.match(failedLogin.text, /username or password is incorrect/i);
+    assert.equal(failedLogin.response.status, 401, 'incorrect access keys must be rejected');
+    assert.match(failedLogin.text, /access key is incorrect/i);
+    assert.match(failedLogin.text, /name="transaction"/);
 
-    const authorization = await harness.beginAuthorization({ clientId });
-    assert.equal(authorization.response.status, 200);
-    const login = await harness.submitLogin({ transaction: authorization.transaction, password: TEST_PASSWORD });
+    const unknownTransaction = await harness.submitLogin({
+      transaction: 'not-a-live-authorization-transaction',
+      accessKey: TEST_ACCESS_KEY,
+    });
+    assert.equal(unknownTransaction.response.status, 400, 'a correct key cannot revive an expired authorization transaction');
+    assert.match(unknownTransaction.text, /invalid or has expired/i);
+
+    const authorization = failedLoginFlow;
+    const login = await harness.submitLogin({ transaction: authorization.transaction, accessKey: TEST_ACCESS_KEY });
     assert.equal(login.response.status, 303);
     const redirect = new URL(login.location);
     assert.equal(redirect.origin + redirect.pathname, new URL(REDIRECT_URI).origin + new URL(REDIRECT_URI).pathname);
@@ -107,7 +115,7 @@ async function run() {
     });
     assert.equal(expiredAccessToken.status, 401, 'expired bearer token must be rejected on the MCP route');
 
-    console.log('✓ ChatGPT Web OAuth metadata, callback allowlist, credentials, PKCE, audience, scope and expiry checks passed');
+    console.log('✓ ChatGPT Web OAuth metadata, callback allowlist, access-key retry, PKCE, audience, scope and expiry checks passed');
   } finally {
     await harness.close();
   }

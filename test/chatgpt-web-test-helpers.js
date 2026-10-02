@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { ChatGptWebOAuthProvider, createChatGptWebPasswordHash, CHATGPT_WEB_SCOPE } from '../dist/chatgpt-web/oauth.js';
+import { ChatGptWebOAuthProvider, CHATGPT_WEB_SCOPE } from '../dist/chatgpt-web/oauth.js';
 import { startChatGptWebGateway } from '../dist/chatgpt-web/gateway.js';
 
 export const PUBLIC_URL = new URL('https://desktop-commander.test');
 export const RESOURCE_URL = new URL('/mcp', PUBLIC_URL);
 export const REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
-export const TEST_USERNAME = 'test-owner';
-export const TEST_PASSWORD = 'long-test-only-password';
+export const TEST_ACCESS_KEY = 'a'.repeat(43);
 
 export async function createGatewayHarness({
   upstreamClientFactory,
@@ -15,8 +14,7 @@ export async function createGatewayHarness({
   sessionIdleTimeoutMs = 30_000,
 } = {}) {
   const oauthProvider = new ChatGptWebOAuthProvider({
-    username: TEST_USERNAME,
-    passwordHash: createChatGptWebPasswordHash(TEST_PASSWORD),
+    accessKey: TEST_ACCESS_KEY,
     resourceUrl: RESOURCE_URL,
     accessTokenTtlSeconds,
   });
@@ -77,12 +75,12 @@ export async function createGatewayHarness({
     return { response, html, transaction, verifier, state };
   };
 
-  const submitLogin = async ({ transaction, username = TEST_USERNAME, password = TEST_PASSWORD } = {}) => {
+  const submitLogin = async ({ transaction, accessKey = TEST_ACCESS_KEY } = {}) => {
     const response = await fetch(new URL('/login', baseUrl), {
       method: 'POST',
       redirect: 'manual',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ transaction, username, password }),
+      body: new URLSearchParams({ transaction, accessKey }),
     });
     return { response, location: response.headers.get('location'), text: await response.text() };
   };

@@ -7,21 +7,27 @@ Chế độ `chatgpt-web` chạy một gateway MCP trên máy này. ChatGPT Web 
 - Node.js 18 trở lên và bản Desktop Commander đã build.
 - Một hostname công khai có DNS và TLS/HTTPS.
 - Reverse proxy hoặc HTTPS ingress chuyển tiếp về `127.0.0.1:3000` trên máy đang chạy Desktop Commander.
-- Một tài khoản đăng nhập duy nhất cho gateway.
+- Một access key riêng cho gateway.
 
 Gateway chỉ bind `127.0.0.1`. Domain, chứng chỉ TLS và reverse proxy nằm ngoài tiến trình này; hiện repository không tạo hạ tầng công khai đó.
 
-## Tạo mật khẩu OAuth
+## Có thể bỏ mật khẩu không?
 
-Từ checkout của repository:
+Không thể bỏ đăng nhập bằng các cài đặt OAuth nâng cao của ChatGPT. DCR chỉ đăng ký OAuth client; `scope` chọn quyền mà client yêu cầu. Tùy chọn **Không xác thực** trong màn hình tạo app là một chế độ khác và cần máy chủ MCP cho phép gọi ẩn danh. Gateway này vẫn yêu cầu bearer token OAuth. Nếu bỏ xác thực ở gateway công khai, bất kỳ ai có thể truy cập URL đều có thể gọi các công cụ trên máy này, gồm chạy lệnh và đọc/ghi tệp.
+
+Sau lần kết nối thành công, ChatGPT dùng token OAuth đã cấp cho các lần gọi tiếp theo. Chỉ cần đăng nhập lại khi kết nối hoặc token cần được cấp mới.
+
+## Tạo access key
+
+Sau khi build, chạy từ checkout của repository:
 
 ```sh
 npm ci
 npm run build
-node dist/index.js chatgpt-web hash-password
+node dist/index.js chatgpt-web generate-key
 ```
 
-Nhập mật khẩu dài ít nhất 12 ký tự hai lần. Lệnh chỉ in ra hash scrypt; nó không in mật khẩu. Lưu hash trong secret manager hoặc cấu hình dịch vụ hệ điều hành, không commit vào repository và không đặt vào file cấu hình được theo dõi bởi Git.
+Lệnh tự tạo access key ngẫu nhiên và ghi vào `~/.config/desktop-commander/chatgpt-web.env`, là file môi trường riêng mà service systemd có thể đọc. File được đặt quyền `600`; lệnh không in giá trị key ra terminal. Mở file này để copy `DC_CHATGPT_WEB_OAUTH_KEY` vào trang đăng nhập. Lệnh giữ lại các cài đặt khác, loại bỏ username/hash password cũ và thay key hiện tại nếu chạy lại. Để dùng đường dẫn file khác, đặt `DC_CHATGPT_WEB_ENV_FILE` khi chạy lệnh. Khởi động lại gateway sau khi sinh hoặc xoay key, ví dụ `systemctl --user restart desktop-commander-chatgpt-web.service`.
 
 ## Chạy gateway
 
@@ -30,8 +36,7 @@ Cấu hình các biến môi trường sau trong môi trường dịch vụ củ
 | Biến | Bắt buộc | Giá trị |
 |---|---:|---|
 | `DC_CHATGPT_WEB_PUBLIC_URL` | Có | Origin HTTPS công khai, ví dụ `https://mcp.example.com` (không kèm `/mcp`) |
-| `DC_CHATGPT_WEB_OAUTH_USERNAME` | Có | Username của tài khoản duy nhất |
-| `DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH` | Có | Hash scrypt tạo ở bước trên |
+| `DC_CHATGPT_WEB_OAUTH_KEY` | Có | Key ngẫu nhiên do lệnh `generate-key` tạo |
 | `DC_CHATGPT_WEB_PORT` | Không | Cổng loopback; mặc định `3000` |
 
 Chạy bằng bản build trong checkout:
@@ -76,7 +81,7 @@ location / {
 2. Chọn tạo app mới và chọn **URL Server**.
 3. Nhập `https://<domain-của-bạn>/mcp`.
 4. Chọn OAuth. ChatGPT sẽ đọc metadata, đăng ký OAuth client và mở trang đăng nhập của gateway.
-5. Đăng nhập bằng username/password đã cấu hình, rồi hoàn tất kết nối.
+5. Copy key từ file môi trường và dán vào ô **Access key**. Nếu nhập sai, trang cho phép thử lại khi yêu cầu OAuth vẫn còn hiệu lực.
 6. Kiểm tra danh sách tools và gọi thử một tool đọc an toàn.
 
 Tham khảo hướng dẫn OpenAI: [Build an MCP server](https://developers.openai.com/plugins/build/mcp-server), [Authentication](https://developers.openai.com/plugins/build/auth), và [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt).

@@ -1,7 +1,6 @@
 import {
   createHash,
   randomBytes,
-  scryptSync,
   timingSafeEqual,
 } from 'node:crypto';
 import type { Response } from 'express';
@@ -70,8 +69,7 @@ type LoginResult =
   | { ok: false; status: 400 | 401 | 429 };
 
 export interface ChatGptWebOAuthOptions {
-  username: string;
-  passwordHash: string;
+  accessKey: string;
   resourceUrl: URL;
   accessTokenTtlSeconds?: number;
   refreshTokenTtlSeconds?: number;
@@ -85,38 +83,13 @@ function token(): string {
   return randomBytes(32).toString('base64url');
 }
 
-function constantTimeStringEqual(left: string, right: string): boolean {
-  const leftDigest = createHash('sha256').update(left).digest();
-  const rightDigest = createHash('sha256').update(right).digest();
-  return timingSafeEqual(leftDigest, rightDigest);
+/** Generate a high-entropy access key suitable for the private gateway env file. */
+export function generateChatGptWebAccessKey(): string {
+  return token();
 }
 
-/** Create the scrypt hash accepted by DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH. */
-export function createChatGptWebPasswordHash(password: string): string {
-  if (password.length < 12) {
-    throw new Error('The ChatGPT Web password must contain at least 12 characters.');
-  }
-  const salt = randomBytes(16);
-  const derivedKey = scryptSync(password, salt, 64);
-  return `scrypt$${salt.toString('hex')}$${derivedKey.toString('hex')}`;
-}
-
-function parsePasswordHash(value: string): { salt: Buffer; derivedKey: Buffer } {
-  const match = /^scrypt\$([a-f0-9]{32})\$([a-f0-9]{128})$/i.exec(value);
-  if (!match) {
-    throw new Error(
-      'DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH must be created with `desktop-commander chatgpt-web hash-password`.'
-    );
-  }
-  return {
-    salt: Buffer.from(match[1], 'hex'),
-    derivedKey: Buffer.from(match[2], 'hex'),
-  };
-}
-
-function passwordMatches(password: string, salt: Buffer, expected: Buffer): boolean {
-  const actual = scryptSync(password, salt, expected.length);
-  return timingSafeEqual(actual, expected);
+function hashAccessKey(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
 }
 
 /**
@@ -140,9 +113,7 @@ export function isAllowedChatGptRedirectUri(value: string): boolean {
 
 export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
-  private readonly username: string;
-  private readonly passwordSalt: Buffer;
-  private readonly passwordDerivedKey: Buffer;
+  private readonly accessKeyDigest: Buffer;
   private readonly resourceUrl: string;
   private readonly accessTokenTtlSeconds: number;
   private readonly refreshTokenTtlSeconds: number;
@@ -156,18 +127,15 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   private loginLockedUntil = 0;
 
   constructor(options: ChatGptWebOAuthOptions) {
-    if (!options.username.trim()) {
-      throw new Error('DC_CHATGPT_WEB_OAUTH_USERNAME must not be empty.');
-    }
     if (options.resourceUrl.pathname !== CHATGPT_WEB_RESOURCE_PATH ||
       options.resourceUrl.search || options.resourceUrl.hash) {
       throw new Error('The OAuth resource URL must identify the /mcp endpoint.');
     }
+    if (!/^[A-Za-z0-9_-]{43}$/.test(options.accessKey)) {
+      throw new Error('DC_CHATGPT_WEB_OAUTH_KEY must be a 43-character base64url key created with `desktop-commander chatgpt-web generate-key`.');
+    }
 
-    this.username = options.username;
-    const parsedHash = parsePasswordHash(options.passwordHash);
-    this.passwordSalt = parsedHash.salt;
-    this.passwordDerivedKey = parsedHash.derivedKey;
+    this.accessKeyDigest = hashAccessKey(options.accessKey);
     this.resourceUrl = options.resourceUrl.href;
     this.accessTokenTtlSeconds = options.accessTokenTtlSeconds ?? 60 * 60;
     this.refreshTokenTtlSeconds = options.refreshTokenTtlSeconds ?? 30 * 24 * 60 * 60;
@@ -229,15 +197,14 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
 <title>Desktop Commander sign in</title>
 <body><main><h1>Sign in to Desktop Commander</h1>
 <p>Authorize your ChatGPT connection to use this self-hosted Desktop Commander server.</p>
-<form method="post" action="/login" autocomplete="on">
+<form method="post" action="/login" autocomplete="off">
 <input type="hidden" name="transaction" value="${transaction}">
-<label>Username <input name="username" autocomplete="username" required></label>
-<label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+<label>Access key <input name="accessKey" type="password" autocomplete="off" required autofocus></label>
 <button type="submit">Sign in</button></form></main></body></html>`);
   }
 
-  /** Validate the one user and consume the pending browser authorization. */
-  completeLogin(transaction: string, username: string, password: string): LoginResult {
+  /** Validate the access key and consume the pending browser authorization. */
+  completeLogin(transaction: string, accessKey: string): LoginResult {
     const now = Date.now();
     this.pruneExpired(now);
     if (now < this.loginLockedUntil) return { ok: false, status: 429 };
@@ -245,7 +212,6 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     const transactionKey = sha256(transaction);
     const pending = this.loginTransactions.get(transactionKey);
     if (!pending) return { ok: false, status: 400 };
-    this.loginTransactions.delete(transactionKey);
     if (this.authorizationCodes.size >= MAX_AUTHORIZATION_CODES) {
       return { ok: false, status: 429 };
     }
@@ -256,14 +222,8 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       this.loginLockedUntil = 0;
     }
 
-    let passwordValid = false;
-    try {
-      passwordValid = passwordMatches(password, this.passwordSalt, this.passwordDerivedKey);
-    } catch {
-      passwordValid = false;
-    }
-    const usernameValid = constantTimeStringEqual(username, this.username);
-    if (!usernameValid || !passwordValid) {
+    const suppliedDigest = hashAccessKey(accessKey);
+    if (!timingSafeEqual(suppliedDigest, this.accessKeyDigest)) {
       this.failedLoginCount += 1;
       if (this.failedLoginCount >= MAX_LOGIN_FAILURES) {
         this.loginLockedUntil = now + LOGIN_WINDOW_MS;
@@ -271,6 +231,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
       return { ok: false, status: this.loginLockedUntil > now ? 429 : 401 };
     }
 
+    this.loginTransactions.delete(transactionKey);
     this.failedLoginCount = 0;
     this.loginWindowStartedAt = now;
     const authorizationCode = token();

@@ -136,17 +136,21 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
   app.post('/login', (req, res) => {
     const body = req.body as Record<string, unknown>;
     const transaction = typeof body.transaction === 'string' ? body.transaction : '';
-    const username = typeof body.username === 'string' ? body.username : '';
-    const password = typeof body.password === 'string' ? body.password : '';
-    const result = options.oauthProvider.completeLogin(transaction, username, password);
+    const accessKey = typeof body.accessKey === 'string' ? body.accessKey : '';
+    const result = options.oauthProvider.completeLogin(transaction, accessKey);
     if (!result.ok) {
+      res.setHeader('Pragma', 'no-cache');
       res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
       const message = result.status === 429
         ? 'Sign-in is temporarily rate limited. Try again later.'
         : result.status === 400
           ? 'This sign-in request is invalid or has expired. Restart the ChatGPT authorization flow.'
-          : 'The username or password is incorrect.';
-      res.status(result.status).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Sign in failed</title><body><h1>Sign in failed</h1><p>${message}</p><p><a href="/">Return to the authorization flow.</a></p></body></html>`);
+          : 'The access key is incorrect. Try again.';
+      const retryForm = result.status === 401 && /^[A-Za-z0-9_-]{43}$/.test(transaction)
+        ? `<form method="post" action="/login" autocomplete="off"><input type="hidden" name="transaction" value="${transaction}"><label>Access key <input name="accessKey" type="password" autocomplete="off" required autofocus></label><button type="submit">Try again</button></form>`
+        : '<p><a href="/">Return to the authorization flow.</a></p>';
+      res.status(result.status).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in failed</title><body><h1>Sign in failed</h1><p>${message}</p>${retryForm}</body></html>`);
       return;
     }
     res.setHeader('Cache-Control', 'no-store');

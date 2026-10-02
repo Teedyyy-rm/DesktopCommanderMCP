@@ -1,60 +1,75 @@
-import { createChatGptWebPasswordHash, ChatGptWebOAuthProvider } from './chatgpt-web/oauth.js';
+import { randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { ChatGptWebOAuthProvider, generateChatGptWebAccessKey } from './chatgpt-web/oauth.js';
 import { startChatGptWebGateway } from './chatgpt-web/gateway.js';
 
-async function readHiddenPassword(label: string): Promise<string> {
-  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
-    throw new Error('Run `desktop-commander chatgpt-web hash-password` in an interactive terminal.');
+function writeChatGptWebAccessKey(): string {
+  const envFilePath = resolve(
+    process.env.DC_CHATGPT_WEB_ENV_FILE ?? join(homedir(), '.config', 'desktop-commander', 'chatgpt-web.env'),
+  );
+  mkdirSync(dirname(envFilePath), { recursive: true, mode: 0o700 });
+
+  let existing = '';
+  try {
+    const fileStat = lstatSync(envFilePath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      throw new Error('The ChatGPT Web environment file must be a regular file, not a symlink.');
+    }
+    existing = readFileSync(envFilePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
-  return new Promise<string>((resolve, reject) => {
-    let value = '';
-    const finish = (error?: Error) => {
-      process.stdin.off('data', onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-      process.stderr.write('\n');
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = (chunk: Buffer | string) => {
-      for (const character of chunk.toString('utf8')) {
-        if (character === '\u0003') {
-          finish(new Error('Password entry was cancelled.'));
-          return;
-        }
-        if (character === '\r' || character === '\n') {
-          finish();
-          return;
-        }
-        if (character === '\u007f' || character === '\b') {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stderr.write('\b \b');
-          }
-          continue;
-        }
-        if (character >= ' ') {
-          value += character;
-          process.stderr.write('*');
-        }
-      }
-    };
+  const preservedLines = existing.split(/\r?\n/).filter((line) =>
+    !/^\s*DC_CHATGPT_WEB_OAUTH_(?:USERNAME|PASSWORD_HASH|KEY)\s*=/.test(line),
+  );
+  while (preservedLines.at(-1) === '') preservedLines.pop();
 
-    process.stderr.write(label);
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', onData);
-  });
+  const accessKey = generateChatGptWebAccessKey();
+  const contents = [...preservedLines, `DC_CHATGPT_WEB_OAUTH_KEY=${accessKey}`, ''].join('\n');
+  const temporaryPath = `${envFilePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  const fd = openSync(temporaryPath, 'wx', 0o600);
+  try {
+    writeFileSync(fd, contents, 'utf8');
+    fsyncSync(fd);
+    closeSync(fd);
+  } catch (error) {
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+
+  try {
+    renameSync(temporaryPath, envFilePath);
+    chmodSync(envFilePath, 0o600);
+  } catch (error) {
+    try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+  return envFilePath;
 }
 
-export async function runChatGptWebPasswordHash(): Promise<void> {
-  const password = await readHiddenPassword('Password (minimum 12 characters): ');
-  const confirmation = await readHiddenPassword('Confirm password: ');
-  if (password !== confirmation) {
-    throw new Error('The passwords did not match. No hash was created.');
-  }
-  const passwordHash = createChatGptWebPasswordHash(password);
-  process.stdout.write(`${passwordHash}\n`);
+export function runChatGptWebGenerateKey(): void {
+  const envFilePath = writeChatGptWebAccessKey();
+  process.stdout.write(
+    `Generated a new ChatGPT Web access key in ${envFilePath}\n` +
+    'Copy the DC_CHATGPT_WEB_OAUTH_KEY value from that private file to sign in.\n' +
+    'Restart the gateway service to activate the new key.\n',
+    () => process.exit(0),
+  );
 }
 
 function readPublicUrl(): URL {
@@ -85,16 +100,13 @@ function readPort(): number {
 }
 
 export async function runChatGptWeb(): Promise<void> {
-  const username = process.env.DC_CHATGPT_WEB_OAUTH_USERNAME;
-  const passwordHash = process.env.DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH;
-  if (!username) throw new Error('Set DC_CHATGPT_WEB_OAUTH_USERNAME before starting the ChatGPT Web gateway.');
-  if (!passwordHash) throw new Error('Set DC_CHATGPT_WEB_OAUTH_PASSWORD_HASH before starting the ChatGPT Web gateway.');
+  const accessKey = process.env.DC_CHATGPT_WEB_OAUTH_KEY;
+  if (!accessKey) throw new Error('Set DC_CHATGPT_WEB_OAUTH_KEY by running `desktop-commander chatgpt-web generate-key` before starting the ChatGPT Web gateway.');
 
   const publicUrl = readPublicUrl();
   const port = readPort();
   const oauthProvider = new ChatGptWebOAuthProvider({
-    username,
-    passwordHash,
+    accessKey,
     resourceUrl: new URL('/mcp', publicUrl),
   });
   const gateway = await startChatGptWebGateway({ publicUrl, port, oauthProvider });
