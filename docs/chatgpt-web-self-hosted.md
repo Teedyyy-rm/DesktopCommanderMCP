@@ -86,7 +86,7 @@ location / {
 
 Tham khảo hướng dẫn OpenAI: [Build an MCP server](https://developers.openai.com/plugins/build/mcp-server), [Authentication](https://developers.openai.com/plugins/build/auth), và [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
 
-Hiện máy này chưa có DNS và HTTPS ingress công khai, nên có thể chạy và kiểm tra gateway cục bộ nhưng chưa thể xác nhận kết nối end-to-end từ ChatGPT Web. URL `https://<domain>/mcp` chỉ hoạt động sau khi domain và ingress được thiết lập.
+Deployment hiện tại dùng DNS và HTTPS ingress tại `https://mcp.omniislabs.io.vn`; metadata OAuth công khai đã được kiểm tra. Mỗi lần gateway khởi động lại, hãy bắt đầu một luồng ủy quyền OAuth mới vì client, transaction và token được lưu trong bộ nhớ. Các deployment khác cần cấu hình DNS và HTTPS ingress riêng.
 
 ## Quyền truy cập
 
