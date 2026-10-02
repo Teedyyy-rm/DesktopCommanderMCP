@@ -37,7 +37,13 @@ export interface ChatGptWebGatewayOptions {
   sessionIdleTimeoutMs?: number;
   /** Injection point used by protocol tests; production creates a stdio child. */
   upstreamClientFactory?: () => Promise<Client>;
+  /** Optional structured tool-call log sink; production writes concise lines to stdout. */
+  toolCallLogger?: (event: ChatGptWebToolCallLogEvent) => void;
 }
+
+export type ChatGptWebToolCallLogEvent =
+  | { phase: 'started'; callId: string; tool: string }
+  | { phase: 'completed'; callId: string; tool: string; status: 'ok' | 'tool_error' | 'failed'; durationMs: number };
 
 interface ProxySession {
   id?: string;
@@ -125,6 +131,10 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
+  app.get('/healthz', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json({ status: 'ok', service: 'desktop-commander-chatgpt-web' });
+  });
   app.use(express.urlencoded({ extended: false, limit: '8kb' }));
   app.use((req, res, next) => {
     const requestPath = req.path;
@@ -181,6 +191,15 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     verifier: options.oauthProvider,
     requiredScopes: [CHATGPT_WEB_SCOPE],
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceUrl),
+  });
+
+  const logToolCall = options.toolCallLogger ?? ((event: ChatGptWebToolCallLogEvent) => {
+    const call = `call=${event.callId} tool=${JSON.stringify(event.tool)}`;
+    if (event.phase === 'started') {
+      console.info(`[ChatGPT Web MCP] tool_call started ${call}`);
+    } else {
+      console.info(`[ChatGPT Web MCP] tool_call completed ${call} status=${event.status} duration_ms=${event.durationMs}`);
+    }
   });
 
   // MCP clients such as the Inspector run in a browser and preflight requests
@@ -287,11 +306,30 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       frontServer.setRequestHandler(ListToolsRequestSchema, async (request) =>
         upstream!.listTools(request.params));
       frontServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const callId = randomBytes(6).toString('hex');
+        const tool = request.params.name;
+        const startedAt = Date.now();
+        logToolCall({ phase: 'started', callId, tool });
         try {
-          return await upstream!.callTool(request.params);
+          const result = await upstream!.callTool(request.params);
+          logToolCall({
+            phase: 'completed',
+            callId,
+            tool,
+            status: result.isError ? 'tool_error' : 'ok',
+            durationMs: Math.max(0, Date.now() - startedAt),
+          });
+          return result;
         } catch (error) {
           const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
           console.error(`[ChatGPT Web MCP] Upstream tool ${request.params.name} failed: ${details}`);
+          logToolCall({
+            phase: 'completed',
+            callId,
+            tool,
+            status: 'failed',
+            durationMs: Math.max(0, Date.now() - startedAt),
+          });
           throw error;
         }
       });

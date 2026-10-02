@@ -56,6 +56,30 @@ desktop-commander chatgpt-web
 
 Gateway in ra địa chỉ loopback và URL công khai dự kiến. Mỗi phiên tạo một stdio worker; gateway nhận tối đa 16 phiên đồng thời và đóng phiên không hoạt động sau 30 phút. Thông tin đăng ký OAuth DCR được lưu riêng trên đĩa với quyền `600`, để `client_id` do ChatGPT cấp vẫn dùng được sau khi gateway khởi động lại. Mã xác thực, access token, refresh token và session MCP vẫn chỉ nằm trong bộ nhớ; sau restart, ChatGPT cần bắt đầu authorization flow mới. Chạy một gateway instance cho mỗi URL vì session không được chia sẻ giữa nhiều tiến trình.
 
+## Theo dõi và kiểm tra gateway
+
+Trên Linux dùng systemd user service, xem log realtime bằng:
+
+```sh
+journalctl --user -u desktop-commander-chatgpt-web.service -n 100 -f
+```
+
+Mỗi lệnh ChatGPT gọi qua gateway tạo log bắt đầu và log kết quả, ví dụ:
+
+```text
+[ChatGPT Web MCP] tool_call started call=8f6a... tool="start_process"
+[ChatGPT Web MCP] tool_call completed call=8f6a... tool="start_process" status=ok duration_ms=42
+```
+
+`status=ok` nghĩa là tool trả kết quả bình thường; `status=tool_error` nghĩa là MCP tool trả nội dung lỗi; `status=failed` nghĩa là lời gọi tới tiến trình Desktop Commander gặp lỗi giao thức/tiến trình. Log không ghi arguments hay kết quả của tool để tránh đưa dữ liệu tệp, lệnh hoặc bí mật vào journal. Có thể kiểm tra gateway còn phục vụ HTTP bằng:
+
+```sh
+systemctl --user is-active desktop-commander-chatgpt-web.service
+curl -fsS http://127.0.0.1:3000/healthz
+```
+
+`/healthz` chỉ xác nhận tiến trình gateway phản hồi HTTP; một dòng `tool_call completed ... status=ok` sau thao tác thực tế mới xác nhận đường gọi từ ChatGPT qua gateway tới tool hoạt động end-to-end.
+
 ## Cấu hình HTTPS ingress
 
 Chuyển tiếp nguyên các đường dẫn sau tới cùng một tiến trình gateway trên `127.0.0.1:<port>`:

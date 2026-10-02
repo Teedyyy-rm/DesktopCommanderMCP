@@ -17,8 +17,10 @@ async function waitFor(predicate, timeoutMs = 3000) {
 async function run() {
   let childStarts = 0;
   let childCloses = 0;
+  const toolCallLogs = [];
   const harness = await createGatewayHarness({
     sessionIdleTimeoutMs: 1200,
+    toolCallLogger: (event) => toolCallLogs.push(event),
     upstreamClientFactory: async () => {
       childStarts += 1;
       let closed = false;
@@ -54,6 +56,10 @@ async function run() {
     const address = harness.gateway.httpServer.address();
     assert.equal(address.address, '127.0.0.1', 'gateway must bind IPv4 loopback only');
     assert.equal(address.port, harness.gateway.port);
+
+    const health = await harness.requestJson('/healthz');
+    assert.equal(health.response.status, 200, 'gateway health endpoint should be available without OAuth');
+    assert.deepEqual(health.body, { status: 'ok', service: 'desktop-commander-chatgpt-web' });
 
     const preflight = await fetch(new URL('/mcp', harness.baseUrl), {
       method: 'OPTIONS',
@@ -101,6 +107,16 @@ async function run() {
       (error) => error instanceof Error,
       'upstream JSON-RPC errors should be returned as MCP request failures',
     );
+    assert.deepEqual(toolCallLogs.map(({ phase, tool, status }) => ({ phase, tool, status })), [
+      { phase: 'started', tool: 'echo', status: undefined },
+      { phase: 'completed', tool: 'echo', status: 'ok' },
+      { phase: 'started', tool: 'tool_error', status: undefined },
+      { phase: 'completed', tool: 'tool_error', status: 'tool_error' },
+      { phase: 'started', tool: 'throw_error', status: undefined },
+      { phase: 'completed', tool: 'throw_error', status: 'failed' },
+    ], 'tool-call logs should show start and outcome for normal, tool-level and transport errors');
+    assert.ok(toolCallLogs.filter((event) => event.phase === 'completed').every((event) => event.durationMs >= 0));
+    assert.equal(JSON.stringify(toolCallLogs).includes('hello'), false, 'tool arguments and results must not be logged');
 
     const resources = await first.client.listResources();
     assert.equal(resources.resources[0].uri, 'test://resource/1');
@@ -130,7 +146,7 @@ async function run() {
     await harness.close();
     await waitFor(() => childCloses === 4);
 
-    console.log('✓ Streamable HTTP initialize, tool/resource/prompt proxy, errors, CORS, per-session child cleanup, idle expiry, shutdown cleanup and loopback binding passed');
+    console.log('✓ Streamable HTTP initialize, health endpoint, tool-call observability, tool/resource/prompt proxy, errors, CORS, per-session child cleanup, idle expiry, shutdown cleanup and loopback binding passed');
   } finally {
     for (const { client } of clients) await client.close().catch(() => undefined);
     await harness.close();

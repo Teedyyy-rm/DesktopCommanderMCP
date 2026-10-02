@@ -13,6 +13,7 @@ export async function createGatewayHarness({
   accessTokenTtlSeconds = 60,
   sessionIdleTimeoutMs = 30_000,
   clientStorePath = null,
+  toolCallLogger,
 } = {}) {
   const oauthProvider = new ChatGptWebOAuthProvider({
     accessKey: TEST_ACCESS_KEY,
@@ -26,6 +27,7 @@ export async function createGatewayHarness({
     oauthProvider,
     sessionIdleTimeoutMs,
     upstreamClientFactory,
+    toolCallLogger,
   });
   const baseUrl = new URL(`http://127.0.0.1:${gateway.port}`);
 
