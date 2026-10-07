@@ -14,7 +14,7 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
-import { runChatGptWeb, runChatGptWebGenerateKey } from './chatgpt-web.js';
+import { runChatGptWeb, runChatGptWebGenerateKey, runChatGptWebMonitor } from './chatgpt-web.js';
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -40,10 +40,12 @@ async function runServer() {
     if (process.argv[2] === 'chatgpt-web') {
       if (process.argv[3] === 'generate-key') {
         runChatGptWebGenerateKey();
+      } else if (process.argv[3] === 'monitor') {
+        await runChatGptWebMonitor();
       } else if (process.argv[3] === undefined) {
         await runChatGptWeb();
       } else {
-        throw new Error('Use `desktop-commander chatgpt-web generate-key` to create the gateway access key.');
+        throw new Error('Use `desktop-commander chatgpt-web generate-key` to create the gateway access key, or `desktop-commander chatgpt-web monitor` to watch tool calls.');
       }
       return;
     }

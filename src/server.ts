@@ -1,4 +1,5 @@
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
     CallToolRequestSchema,
@@ -51,6 +52,14 @@ import {
     GetPromptsArgsSchema,
     GetRecentToolCallsArgsSchema,
     WritePdfArgsSchema,
+    KiloAgentInputSchema,
+    LocalAgentProvidersArgsSchema,
+    LocalAgentStartArgsSchema,
+    LocalAgentListArgsSchema,
+    LocalAgentTaskArgsSchema,
+    LocalAgentCancelArgsSchema,
+    LocalAgentReadReportArgsSchema,
+    LocalAgentSendArgsSchema,
     toolArgSchemas,
 } from './tools/schemas.js';
 import {
@@ -59,6 +68,10 @@ import {
     buildUnsupportedParamsWarning,
 } from './utils/unsupportedParams.js';
 import { getConfig, setConfigValue } from './tools/config.js';
+import { handleKiloAgent } from './tools/kilo-agent.js';
+import { handleLocalAgentTool } from './tools/local-agent.js';
+import { handleZcodeControlTool } from './tools/ornixai-control-client.js';
+import { zcodeControlToolDefinitions } from './tools/ornixai-control-tools.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
@@ -873,6 +886,81 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
             },
 
+            {
+                name: "kilo_agent",
+                description: `
+                        Start or inspect a Kilo TUI task through Orca on the repository's existing main worktree.
+
+                        action="start" requires repository_path for the intended Git repo on
+                        the Remote Device. It resolves that repo's existing main worktree,
+                        even if the Remote Device is currently in a task worktree, then opens
+                        Kilo's interactive TUI in an Orca-owned terminal attached directly to
+                        main. It never creates a Git worktree. Main must be clean and synchronized
+                        with origin/main, and only one Kilo task may
+                        run at a time in that checkout. Kilo starts with automatic permission
+                        approval enabled.
+                        It returns a task_id promptly; use action="status" with that task_id
+                        to check progress and retrieve the final report. Changes Kilo makes are
+                        made directly in the main checkout.
+
+                        The selected main checkout must be clean, synchronized, and known to
+                        Orca. The prompt is passed as one safely quoted Kilo TUI argument and
+                        is not evaluated as a shell command.
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: KiloAgentInputSchema,
+                annotations: {
+                    title: "Run Kilo through Orca",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: true,
+                },
+            },
+
+            {
+                name: "local_agent_providers",
+                description: `List registered local coding-agent adapters. This reports Kilo and Zcode adapters, but registration does not claim that their runtime or control endpoint is currently healthy. Use the zcode_* tools for Zcode events, interactions, identity, and detailed reports.`,
+                inputSchema: zodToJsonSchema(LocalAgentProvidersArgsSchema),
+                annotations: { title: "List Local Agent Providers", readOnlyHint: true, openWorldHint: false },
+            },
+            {
+                name: "local_agent_start",
+                description: `Start a provider-backed local coding-agent task. Use provider="zcode" to start a native Zcode session through its authenticated local Host endpoint, or provider="kilo" for the existing Orca terminal workflow. Supply an absolute repository_path. Registration does not guarantee the selected runtime is online.`,
+                inputSchema: zodToJsonSchema(LocalAgentStartArgsSchema),
+                annotations: { title: "Start Local Agent", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+            },
+            {
+                name: "local_agent_list",
+                description: `List recent local agent tasks, including completed tasks whose reports remain available. Filter by provider, repository, or status to recover task_id values before checking status or reading a report.`,
+                inputSchema: zodToJsonSchema(LocalAgentListArgsSchema),
+                annotations: { title: "List Local Agent Tasks", readOnlyHint: true, openWorldHint: false },
+            },
+            {
+                name: "local_agent_status",
+                description: `Read the operational state of a provider-backed task. Zcode status is read from the canonical Zcode session; Kilo may also return its terminal and Git workspace details. This tool does not return model reasoning or invent a percentage.`,
+                inputSchema: zodToJsonSchema(LocalAgentTaskArgsSchema),
+                annotations: { title: "Read Local Agent Status", readOnlyHint: true, openWorldHint: true },
+            },
+            {
+                name: "local_agent_read_report",
+                description: `Read the final report for a provider-backed task. Zcode reports are reconstructed from canonical session and event facts; Kilo reports use its provider report store.`,
+                inputSchema: zodToJsonSchema(LocalAgentReadReportArgsSchema),
+                annotations: { title: "Read Local Agent Report", readOnlyHint: true, openWorldHint: false },
+            },
+            {
+                name: "local_agent_send",
+                description: `Continue a provider-backed task while keeping its native session identity. Zcode routes follow-up through native queue admission; Kilo accepts follow-ups after a turn completes. Use zcode_task_send when you need delivery control or events.`,
+                inputSchema: zodToJsonSchema(LocalAgentSendArgsSchema),
+                annotations: { title: "Send Local Agent Follow-up", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+            },
+            {
+                name: "local_agent_cancel",
+                description: `Stop the active provider-backed task. Zcode uses its native foreground stop command; Kilo closes its Orca-owned terminal.`,
+                inputSchema: zodToJsonSchema(LocalAgentCancelArgsSchema),
+                annotations: { title: "Cancel Local Agent Task", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+            },
+
+            ...zcodeControlToolDefinitions,
+
             // Terminal tools
             {
                 name: "start_process",
@@ -1219,6 +1307,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 
 async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {
     const { name, arguments: args } = request.params;
+    const requestMeta = request.params._meta as Record<string, unknown> | undefined;
+    const forwardedCallId = typeof requestMeta?.desktop_commander_call_id === 'string'
+        ? requestMeta.desktop_commander_call_id
+        : `dcm-${randomUUID()}`;
     const startTime = Date.now();
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
@@ -1400,6 +1492,34 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
             // Terminal tools
             case "start_process":
                 result = await handlers.handleStartProcess(args);
+                break;
+
+            case "kilo_agent":
+                result = await handleKiloAgent(args);
+                break;
+
+            case "local_agent_providers":
+            case "local_agent_start":
+            case "local_agent_list":
+            case "local_agent_status":
+            case "local_agent_read_report":
+            case "local_agent_send":
+            case "local_agent_cancel":
+                result = await handleLocalAgentTool(name, args, forwardedCallId);
+                break;
+
+            case "zcode_runtime_status":
+            case "zcode_workspace_list":
+            case "zcode_task_start":
+            case "zcode_task_list":
+            case "zcode_task_status":
+            case "zcode_task_send":
+            case "zcode_task_events":
+            case "zcode_task_report":
+            case "zcode_task_stop":
+            case "zcode_interaction_list":
+            case "zcode_interaction_respond":
+                result = await handleZcodeControlTool(name, args, forwardedCallId);
                 break;
 
             case "read_process_output":

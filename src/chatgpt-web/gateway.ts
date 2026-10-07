@@ -74,17 +74,29 @@ export interface ChatGptWebGateway {
   close(): Promise<void>;
 }
 
+/** Keep the ChatGPT Web MCP child isolated while forwarding explicit tool configuration. */
+export function buildChatGptWebChildEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const childEnvironment: Record<string, string> = { DC_CHATGPT_WEB_CHILD: 'true' };
+  for (const key of [
+    'DESKTOP_COMMANDER_DISABLE_TELEMETRY',
+    'KILO_AGENT_WORKING_DIRECTORY',
+    // Locator paths are configuration, not credentials. The control token is
+    // read from the owner-only file by the child and is never copied here.
+    'ORNIXAI_CONTROL_ENDPOINT_PATH',
+    'ORNIXAI_CONTROL_CREDENTIAL_FILE',
+  ] as const) {
+    const value = source[key];
+    if (value) childEnvironment[key] = value;
+  }
+  return childEnvironment;
+}
+
 async function createLocalDesktopCommanderClient(): Promise<Client> {
   const entrypoint = path.resolve(__dirname, '..', 'index.js');
-  const childEnvironment: Record<string, string> = {
-    // This process is an internal worker for one HTTP MCP session.
-    DC_CHATGPT_WEB_CHILD: 'true',
-  };
-  // Preserve an explicit telemetry opt-out for the stdio worker without
-  // inheriting unrelated environment secrets from the gateway process.
-  if (process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY) {
-    childEnvironment.DESKTOP_COMMANDER_DISABLE_TELEMETRY = process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY;
-  }
+  // Keep the child environment allowlisted rather than inheriting unrelated
+  // gateway credentials. The configured Kilo repository must reach this
+  // per-session process, which is where kilo_agent resolves its working tree.
+  const childEnvironment = buildChatGptWebChildEnvironment();
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [entrypoint, '--no-onboarding'],
@@ -107,6 +119,18 @@ async function createLocalDesktopCommanderClient(): Promise<Client> {
 
 function jsonError(res: Response, status: number, code: string, message: string): void {
   res.status(status).json({ error: { code, message } });
+}
+
+/** Default text sink: the journal format operators already read with journalctl. */
+export function formatChatGptWebToolCallLogEvent(event: ChatGptWebToolCallLogEvent): void {
+  const call = `tool ${event.tool}`;
+  if (event.phase === 'started') {
+    console.info(`🔧 Received tool call ${event.callId}: ${event.tool} ${JSON.stringify(event.arguments)} metadata: ${JSON.stringify(event.metadata)}`);
+  } else if (event.status === 'failed') {
+    console.error(`❌ Tool call ${call} failed after ${event.durationMs}ms: ${event.error ?? 'Unknown error'}`);
+  } else {
+    console.info(`✅ Tool call ${event.tool} completed:\n ${JSON.stringify(event.result)}`);
+  }
 }
 
 export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
@@ -204,16 +228,7 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceUrl),
   });
 
-  const logToolCall = options.toolCallLogger ?? ((event: ChatGptWebToolCallLogEvent) => {
-    const call = `tool ${event.tool}`;
-    if (event.phase === 'started') {
-      console.info(`🔧 Received tool call ${event.callId}: ${event.tool} ${JSON.stringify(event.arguments)} metadata: ${JSON.stringify(event.metadata)}`);
-    } else if (event.status === 'failed') {
-      console.error(`❌ Tool call ${call} failed after ${event.durationMs}ms: ${event.error ?? 'Unknown error'}`);
-    } else {
-      console.info(`✅ Tool call ${event.tool} completed:\n ${JSON.stringify(event.result)}`);
-    }
-  });
+  const logToolCall = options.toolCallLogger ?? formatChatGptWebToolCallLogEvent;
 
   // MCP clients such as the Inspector run in a browser and preflight requests
   // carrying Authorization and MCP session headers. No cookies are used, so a
@@ -333,7 +348,13 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
         };
         logToolCall({ phase: 'started', callId, tool, arguments: args, metadata });
         try {
-          const result = await upstream!.callTool(request.params);
+          const result = await upstream!.callTool({
+            ...request.params,
+            _meta: {
+              ...(request.params._meta ?? {}),
+              desktop_commander_call_id: callId,
+            },
+          });
           logToolCall({
             phase: 'completed',
             callId,

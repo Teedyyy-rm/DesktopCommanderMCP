@@ -14,7 +14,11 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { ChatGptWebOAuthProvider, generateChatGptWebAccessKey } from './chatgpt-web/oauth.js';
-import { startChatGptWebGateway } from './chatgpt-web/gateway.js';
+import { createEventLogWriter } from './chatgpt-web/event-log.js';
+import { formatChatGptWebToolCallLogEvent, startChatGptWebGateway } from './chatgpt-web/gateway.js';
+import { runChatGptWebMonitor } from './chatgpt-web/monitor.js';
+
+export { runChatGptWebMonitor };
 
 function writeChatGptWebAccessKey(): string {
   const envFilePath = resolve(
@@ -109,9 +113,19 @@ export async function runChatGptWeb(): Promise<void> {
     accessKey,
     resourceUrl: new URL('/mcp', publicUrl),
   });
-  const gateway = await startChatGptWebGateway({ publicUrl, port, oauthProvider });
+  const eventLogWriter = createEventLogWriter();
+  const gateway = await startChatGptWebGateway({
+    publicUrl,
+    port,
+    oauthProvider,
+    toolCallLogger: (event) => {
+      eventLogWriter.write(event);
+      formatChatGptWebToolCallLogEvent(event);
+    },
+  });
   process.stderr.write(`[ChatGPT Web MCP] Listening on http://127.0.0.1:${gateway.port}/mcp\n`);
   process.stderr.write(`[ChatGPT Web MCP] Public URL for your HTTPS ingress: ${new URL('/mcp', publicUrl).href}\n`);
+  process.stderr.write(`[ChatGPT Web MCP] Watch tool calls with \`desktop-commander chatgpt-web monitor\` (${eventLogWriter.filePath})\n`);
 
   await new Promise<void>((resolve) => {
     let stopping = false;

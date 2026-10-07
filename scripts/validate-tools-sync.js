@@ -26,7 +26,18 @@ const colors = {
 };
 
 async function extractToolsFromManifest() {
-  const manifestPath = join(rootDir, 'mcpb-bundle', 'manifest.json');
+  // Prefer the built bundle when present so validation catches stale package
+  // artifacts. A normal source checkout does not include this ignored output;
+  // validate against the checked-in template instead of failing with ENOENT.
+  const bundleManifestPath = join(rootDir, 'mcpb-bundle', 'manifest.json');
+  const templateManifestPath = join(rootDir, 'manifest.template.json');
+  let manifestPath = templateManifestPath;
+  try {
+    await readFile(bundleManifestPath, 'utf-8');
+    manifestPath = bundleManifestPath;
+  } catch {
+    // The template is the source of truth until a bundle is built.
+  }
   const content = await readFile(manifestPath, 'utf-8');
   const manifest = JSON.parse(content);
   
@@ -43,7 +54,21 @@ async function extractToolsFromServer() {
 
     let output = '';
     let errorOutput = '';
+    let settled = false;
+    let initialized = false;
     const messages = [];
+    const timeout = setTimeout(() => {
+      finish(new Error(`Timed out waiting for tools/list; messages=${JSON.stringify(messages)}; stderr=${errorOutput}`));
+    }, 15_000);
+
+    function finish(error, tools) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      server.kill();
+      if (error) reject(error);
+      else resolve(tools);
+    }
 
     server.stdout.on('data', (data) => {
       output += data.toString();
@@ -55,7 +80,24 @@ async function extractToolsFromServer() {
       for (const line of lines) {
         if (line.trim()) {
           try {
-            messages.push(JSON.parse(line));
+            const message = JSON.parse(line);
+            messages.push(message);
+            if (message.id === 1) {
+              if (message.error) {
+                finish(new Error(`MCP initialize failed: ${JSON.stringify(message.error)}; stderr=${errorOutput}`));
+              } else if (message.result && !initialized) {
+                initialized = true;
+                server.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+                server.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) + '\n');
+              }
+            } else if (message.id === 2) {
+              if (message.error) {
+                finish(new Error(`tools/list failed: ${JSON.stringify(message.error)}; stderr=${errorOutput}`));
+              } else if (message.result?.tools) {
+                const tools = message.result.tools.map(tool => tool.name).sort();
+                finish(undefined, tools);
+              }
+            }
           } catch (e) {
             // Not JSON, might be debug output
           }
@@ -65,6 +107,13 @@ async function extractToolsFromServer() {
 
     server.stderr.on('data', (data) => {
       errorOutput += data.toString();
+    });
+
+    server.on('error', (error) => {
+      finish(new Error(`Failed to start MCP server: ${error.message}`));
+    });
+    server.on('exit', (code, signal) => {
+      if (!settled) finish(new Error(`MCP server exited before tools/list completed (code=${code}, signal=${signal}); messages=${JSON.stringify(messages)}; stderr=${errorOutput}`));
     });
 
     // Step 1: Send initialize request
@@ -83,39 +132,6 @@ async function extractToolsFromServer() {
     };
 
     server.stdin.write(JSON.stringify(initRequest) + '\n');
-
-    // Wait for initialize response, then send tools/list
-    setTimeout(() => {
-      // Step 2: Send tools/list request
-      const toolsRequest = {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/list',
-        params: {}
-      };
-
-      server.stdin.write(JSON.stringify(toolsRequest) + '\n');
-
-      // Wait for tools/list response
-      setTimeout(() => {
-        server.kill();
-
-        // Find the tools/list response
-        const toolsResponse = messages.find(msg => msg.id === 2 && msg.result);
-
-        if (!toolsResponse) {
-          reject(new Error('No tools/list response received'));
-          return;
-        }
-
-        const tools = toolsResponse.result.tools.map(tool => tool.name).sort();
-        resolve(tools);
-      }, 1000);
-    }, 500);
-
-    server.on('error', (error) => {
-      reject(new Error(`Failed to start server: ${error.message}`));
-    });
   });
 }
 

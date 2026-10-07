@@ -94,7 +94,15 @@ export class DesktopCommanderIntegration {
             // welcome page in a browser the remote user would never see.
             this.mcpTransport = new StdioClientTransport({
                 ...config,
-                env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: 'true' }
+                env: {
+                    ...getDefaultEnvironment(),
+                    ...config.env,
+                    DC_REMOTE_DEVICE: 'true',
+                    // The packaged MCP process can have a different cwd from
+                    // the Remote Device process. Agent worktrees must branch
+                    // from the user's Remote Device working directory.
+                    DC_REMOTE_DEVICE_CWD: process.cwd(),
+                }
             });
 
             // Create MCP client

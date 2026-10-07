@@ -35,12 +35,13 @@ Lệnh tự tạo access key ngẫu nhiên và ghi vào `~/.config/desktop-comma
 
 Cấu hình các biến môi trường sau trong môi trường dịch vụ của bạn:
 
-| Biến | Bắt buộc | Giá trị |
-|---|---:|---|
-| `DC_CHATGPT_WEB_PUBLIC_URL` | Có | Origin HTTPS công khai, ví dụ `https://mcp.example.com` (không kèm `/mcp`) |
-| `DC_CHATGPT_WEB_OAUTH_KEY` | Có | Key ngẫu nhiên do lệnh `generate-key` tạo |
-| `DC_CHATGPT_WEB_PORT` | Không | Cổng loopback; mặc định `3000` |
-| `DC_CHATGPT_WEB_CLIENTS_FILE` | Không | File JSON lưu đăng ký OAuth DCR; mặc định `~/.config/desktop-commander/chatgpt-web-oauth-clients.json` |
+| Biến                          | Bắt buộc | Giá trị                                                                                                |
+| ----------------------------- | -------: | ------------------------------------------------------------------------------------------------------ |
+| `DC_CHATGPT_WEB_PUBLIC_URL`   |       Có | Origin HTTPS công khai, ví dụ `https://mcp.example.com` (không kèm `/mcp`)                             |
+| `DC_CHATGPT_WEB_OAUTH_KEY`    |       Có | Key ngẫu nhiên do lệnh `generate-key` tạo                                                              |
+| `DC_CHATGPT_WEB_PORT`         |    Không | Cổng loopback; mặc định `3000`                                                                         |
+| `DC_CHATGPT_WEB_CLIENTS_FILE` |    Không | File JSON lưu đăng ký OAuth DCR; mặc định `~/.config/desktop-commander/chatgpt-web-oauth-clients.json` |
+| `DC_CHATGPT_WEB_EVENT_LOG`    |    Không | File NDJSON cho TUI giám sát; mặc định `~/.claude-server-commander/chatgpt-web-events.ndjson`          |
 
 Chạy bằng bản build trong checkout:
 
@@ -69,17 +70,47 @@ Mỗi lệnh ChatGPT gọi qua gateway tạo log nhận lệnh và log kết qu�
 ```text
 🔧 Received tool call 81f...: start_process {"command":"pwd","timeout_ms":3000} metadata: {"transport":"streamable_http","clientInfo":{"name":"openai-mcp","version":"1.0.0"},"oauth_client_id":"...","origin_instance":"...","gateway_pid":1234,"session_id":"..."}
 ✅ Tool call start_process completed:
- {"content":[{"type":"text","text":"Process started with PID 1234 (shell: /usr/bin/zsh)\\nInitial output:\\n/home/obito/projects/DesktopCommanderMCP"}]}
+ {"content":[{"type":"text","text":"Process started with PID 1234 (shell: /usr/bin/zsh)\\nInitial output:\\n/workspace/DesktopCommanderMCP"}]}
 ```
 
 Metadata ghi transport, client MCP thực tế, OAuth client, instance gateway và session MCP; khi không gọi được tool, journal ghi dòng `❌ Tool call ... failed`. Log này bao gồm arguments và nội dung kết quả giống terminal `remote`. Có thể kiểm tra gateway còn phục vụ HTTP bằng:
 
 ```sh
 systemctl --user is-active desktop-commander-chatgpt-web.service
+systemctl --user restart desktop-commander-chatgpt-web.service
 curl -fsS http://127.0.0.1:3000/healthz
 ```
 
 `/healthz` chỉ xác nhận tiến trình gateway phản hồi HTTP; cặp dòng `🔧 Received tool call ...` và `✅ Tool call ... completed` sau thao tác thực tế xác nhận lệnh đã đi qua gateway tới tiến trình Desktop Commander local. Nếu chỉ thấy dòng nhận lệnh nhưng không thấy hoàn tất, xem dòng lỗi ngay sau đó để tìm nguyên nhân.
+
+## TUI giám sát tool call
+
+Dòng log `✅ Tool call ... completed` không in `callId`, `durationMs` hay `status`, nên không thể dựng lại bảng tin cậy chỉ từ journalctl. Vì vậy gateway ghi thêm một file NDJSON riêng cho mỗi tool call hoàn tất, và TUI đọc file đó:
+
+```sh
+desktop-commander chatgpt-web monitor
+node dist/index.js chatgpt-web monitor
+```
+
+TUI chỉ quan sát, không có lệnh điều khiển. Mở được cả khi gateway chưa chạy: nếu chưa có file log, màn hình hướng dẫn chạy `systemctl --user start desktop-commander-chatgpt-web.service`.
+
+| Phím              | Tác dụng                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `↑` `↓` / `k` `j` | Chọn dòng                                                                                   |
+| `Enter` / `Space` | Bung tầng trong dòng đang chọn: tóm tắt → thông tin call → arguments → result, rồi đóng lại |
+| `f`               | Lọc theo tool (khớp viết hoa không phân biệt thứ tự: `f` khớp cả `read_file` lẫn `find`)    |
+| `/`               | Tìm trong arguments và result                                                               |
+| `p`               | Tạm dừng tự cuộn theo dòng mới nhất                                                         |
+| `q` / `Ctrl+C`    | Thoát                                                                                       |
+
+Header hiển thị trạng thái gateway (ALIVE khi có call trong 30 s gần nhất), số session `n/16`, tổng số call, ok/err, call/phút và thời gian từ call cuối.
+
+Vài điểm vận hành:
+
+- File log là `~/.claude-server-commander/chatgpt-web-events.ndjson` (đổi bằng `DC_CHATGPT_WEB_EVENT_LOG`), một dòng JSON cho mỗi call, tự cắt còn 28 MB khi vượt 32 MB. File được đặt quyền `600` vì có chứa arguments và nội dung kết quả, tức nội dung file của bạn.
+- Gateway chỉ ghi thêm, không đổi output text cũ: `journalctl -u desktop-commander-chatgpt-web.service -f` cho output y hệt trước đây.
+- Nhiều gateway instance có thể cùng ghi một file (append là atomic ở cấp OS); TUI bỏ qua dòng hỏng và tự phục hồi sau khi file bị trim.
+- File này tách riêng có chủ đích, không dùng chung với `~/.claude-server-commander/tool-history.jsonl`: file đó do từng stdio child của từng session cùng ghi và bị rewrite từ RAM của tiến trình đó.
 
 ## Cấu hình HTTPS ingress
 

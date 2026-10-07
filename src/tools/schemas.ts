@@ -1,4 +1,6 @@
 import { z } from "zod";
+import path from 'path';
+import { ZcodeControlToolSchemas } from './ornixai-control-schemas.js';
 
 // Config tools schemas
 export const GetConfigArgsSchema = z.object({
@@ -228,6 +230,74 @@ export const GetPromptsArgsSchema = z.object({
   // anonymous_user_use_case: z.string().optional(),
 });
 
+// Start and monitor a Kilo TUI session in Orca's existing main worktree.
+export const KiloAgentArgsSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('start'),
+    prompt: z.string().trim().min(1).max(100_000),
+    repository_path: z.string().trim().min(1).max(4_096).refine((value) => path.isAbsolute(value), 'must be an absolute Remote Device path'),
+  }),
+  z.object({
+    action: z.literal('status'),
+    task_id: z.string().uuid(),
+  }),
+]);
+
+// MCP requires the root input schema to be an object; keep the discriminated
+// Zod union for runtime validation and publish an equivalent object schema.
+export const KiloAgentInputSchema = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['start', 'status'] },
+    prompt: { type: 'string', minLength: 1, maxLength: 100_000 },
+    repository_path: { type: 'string', minLength: 1, maxLength: 4_096, description: 'Absolute path to the intended Git repository on the Remote Device.' },
+    task_id: { type: 'string', format: 'uuid' },
+  },
+  required: ['action'],
+  oneOf: [
+    { properties: { action: { const: 'start' } }, required: ['prompt', 'repository_path'] },
+    { properties: { action: { const: 'status' } }, required: ['task_id'] },
+  ],
+  additionalProperties: false,
+} as const;
+
+const AgentProviderIdSchema = z.string().trim().min(1).max(40).regex(/^[a-z][a-z0-9-]*$/, 'must be a lowercase provider id');
+const AgentTaskIdSchema = z.string().uuid();
+export const LOCAL_AGENT_STATUSES = ['starting', 'running', 'completed', 'failed', 'interrupted', 'cancelled'] as const;
+export type LocalAgentTaskStatus = typeof LOCAL_AGENT_STATUSES[number];
+
+export const LocalAgentProvidersArgsSchema = z.object({}).strict();
+export const LocalAgentStartArgsSchema = z.object({
+  provider: AgentProviderIdSchema,
+  prompt: z.string().trim().min(1).max(100_000),
+  repository_path: z.string().trim().min(1).max(4_096).refine((value) => path.isAbsolute(value), 'must be an absolute Remote Device path'),
+  idempotency_key: z.string().trim().min(8).max(256).optional(),
+}).strict().superRefine((args, context) => {
+  if (args.provider === 'zcode' && !args.idempotency_key) {
+    context.addIssue({ code: 'custom', path: ['idempotency_key'], message: 'is required for Zcode task start' });
+  }
+});
+export const LocalAgentListArgsSchema = z.object({
+  provider: AgentProviderIdSchema.optional(),
+  repository_path: z.string().trim().min(1).max(4_096).refine((value) => path.isAbsolute(value), 'must be an absolute Remote Device path').optional(),
+  status: z.enum(LOCAL_AGENT_STATUSES).optional(),
+  limit: z.number().int().min(1).max(50).optional().default(20),
+}).strict();
+export const LocalAgentTaskArgsSchema = z.object({ task_id: AgentTaskIdSchema }).strict();
+export const LocalAgentCancelArgsSchema = z.object({
+  task_id: AgentTaskIdSchema,
+  idempotency_key: z.string().trim().min(8).max(256).optional(),
+}).strict();
+export const LocalAgentReadReportArgsSchema = z.object({
+  task_id: AgentTaskIdSchema,
+  turn_id: z.string().trim().min(1).max(40).regex(/^turn-[1-9][0-9]*$/).optional(),
+}).strict();
+export const LocalAgentSendArgsSchema = z.object({
+  task_id: AgentTaskIdSchema,
+  message: z.string().trim().min(1).max(100_000),
+  idempotency_key: z.string().trim().min(8).max(256).optional(),
+}).strict();
+
 // Tool history schema
 export const GetRecentToolCallsArgsSchema = z.object({
   maxResults: z.number().min(1).max(1000).optional().default(50),
@@ -274,4 +344,13 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   give_feedback_to_desktop_commander: GiveFeedbackArgsSchema,
   get_prompts: GetPromptsArgsSchema,
   track_ui_event: TrackUiEventArgsSchema,
+  kilo_agent: KiloAgentArgsSchema,
+  local_agent_providers: LocalAgentProvidersArgsSchema,
+  local_agent_start: LocalAgentStartArgsSchema,
+  local_agent_list: LocalAgentListArgsSchema,
+  local_agent_status: LocalAgentTaskArgsSchema,
+  local_agent_read_report: LocalAgentReadReportArgsSchema,
+  local_agent_send: LocalAgentSendArgsSchema,
+  local_agent_cancel: LocalAgentCancelArgsSchema,
+  ...ZcodeControlToolSchemas,
 };
