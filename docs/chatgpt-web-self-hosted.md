@@ -13,11 +13,11 @@ Gateway chỉ bind `127.0.0.1`. Domain, chứng chỉ TLS và reverse proxy nằ
 
 ## Có cần nhập access key không?
 
-Không cần nhập key trong trình duyệt. Gateway đọc `DC_CHATGPT_WEB_OAUTH_KEY` từ môi trường riêng của service và dùng key đã cấu hình làm mặc định khi hoàn tất OAuth. Giá trị key không được đưa vào HTML. Trang xác thực chỉ cần bấm **Continue to ChatGPT**.
+Không cần nhập key trong trình duyệt. Gateway đọc `DC_CHATGPT_WEB_OAUTH_KEY` từ môi trường riêng của service và dùng key đã cấu hình làm mặc định khi hoàn tất OAuth. Giá trị key không được đưa vào HTML. Trang xác thực chỉ cần bấm **Continue to Desktop Commander**.
 
 Giao dịch đăng nhập chờ không còn hết hạn sau 10 phút. Gateway chấp nhận gửi lại cùng một giao dịch sau khi đã hoàn tất: trước khi authorization code được đổi, nó trả lại cùng callback/code; sau khi đổi, nó báo rằng authorization đã hoàn tất. Authorization code vẫn dùng một lần, ràng buộc PKCE và có hạn 5 phút. Nếu có hơn 128 giao dịch cùng chờ, gateway loại giao dịch cũ nhất. Khởi động lại gateway vẫn xóa trạng thái OAuth đang giữ trong bộ nhớ, vì vậy hãy bắt đầu kết nối mới sau khi restart. Thời hạn access/refresh token là thiết lập riêng và không bị thay đổi bởi thời hạn giao dịch đăng nhập.
 
-OAuth vẫn cấp bearer token và gateway kiểm tra token trên từng yêu cầu MCP. Vì gateway tự hoàn tất đăng nhập bằng key đã cấu hình, người nào biết URL và tự thêm connector ChatGPT có thể lấy quyền gọi tools; chỉ dùng chế độ này cho connector cá nhân và giữ kín endpoint. Các tools chạy dưới quyền hệ điều hành của máy này.
+OAuth vẫn cấp bearer token và gateway kiểm tra token trên từng yêu cầu MCP. Vì gateway tự hoàn tất đăng nhập bằng key đã cấu hình, người nào biết URL và tự thêm connector vào tài khoản ChatGPT hoặc Claude có thể lấy quyền gọi tools; chỉ dùng chế độ này cho connector cá nhân và giữ kín endpoint. Các tools chạy dưới quyền hệ điều hành của máy này.
 
 ## Tạo access key
 
@@ -140,10 +140,26 @@ location / {
 2. Chọn tạo app mới và chọn **URL Server**.
 3. Nhập `https://<domain-của-bạn>/mcp`.
 4. Chọn OAuth. ChatGPT sẽ đọc metadata, đăng ký OAuth client và mở trang xác thực của gateway.
-5. Bấm **Continue to ChatGPT**. Gateway dùng key đã nạp từ môi trường service; không cần copy/paste key.
+5. Bấm **Continue to Desktop Commander**. Gateway dùng key đã nạp từ môi trường service; không cần copy/paste key.
 6. Kiểm tra danh sách tools và gọi thử một tool đọc an toàn.
 
+## Kết nối Claude Web
+
+Claude Web kết nối tới cùng gateway qua remote MCP HTTPS; cấu hình `stdio` trong `claude_desktop_config.json` chỉ dành cho client cục bộ và không dùng cho Claude Web.
+
+1. Trên Claude.ai, mở **Settings → Connectors → Add custom connector**.
+2. Nhập tên kết nối và URL MCP công khai, ví dụ `https://mcp.example.com/mcp`, rồi chọn **Add**.
+3. Chọn **Connect** để bắt đầu OAuth.
+4. Ở trang Desktop Commander, bấm **Continue to Desktop Commander** để hoàn tất.
+5. Trong chat, bật Desktop Commander ở **Search and tools** rồi gọi thử một tool đọc an toàn.
+
+Remote MCP connectors trên Claude.ai hiện dành cho các gói Pro, Max, Team và Enterprise. Với Team hoặc Enterprise, quản trị viên có thể cần thêm connector trong phần **Organization connectors** trước khi thành viên kết nối. Gateway chỉ chấp nhận callback OAuth Claude chính thức `https://claude.ai/api/mcp/auth_callback` và callback HTTPS đã được giới hạn của ChatGPT.
+
+Sau khi phát hành hoặc triển khai bản gateway có hỗ trợ Claude, dùng URL đã cấu hình cho service; hostname hiện được tài liệu deployment ghi nhận là `https://mcp.omniislabs.io.vn/mcp`.
+
 Tham khảo hướng dẫn OpenAI: [Build an MCP server](https://developers.openai.com/plugins/build/mcp-server), [Authentication](https://developers.openai.com/plugins/build/auth), và [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+Tham khảo hướng dẫn Anthropic: [Custom connectors using remote MCP](https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp) và [Building custom connectors](https://support.anthropic.com/en/articles/11503834-building-custom-integrations-via-remote-mcp-servers).
 
 Deployment hiện tại dùng DNS và HTTPS ingress tại `https://mcp.omniislabs.io.vn`; metadata OAuth công khai đã được kiểm tra. Đăng ký client được giữ qua restart; mỗi lần gateway khởi động lại, hãy bắt đầu một luồng ủy quyền OAuth mới vì transaction và token đang hoạt động vẫn được lưu trong bộ nhớ. Các deployment khác cần cấu hình DNS và HTTPS ingress riêng.
 

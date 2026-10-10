@@ -6,6 +6,7 @@ import { startChatGptWebGateway } from '../dist/chatgpt-web/gateway.js';
 export const PUBLIC_URL = new URL('https://desktop-commander.test');
 export const RESOURCE_URL = new URL('/mcp', PUBLIC_URL);
 export const REDIRECT_URI = 'https://chatgpt.com/connector_platform_oauth_redirect';
+export const CLAUDE_REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
 export const TEST_ACCESS_KEY = 'a'.repeat(43);
 
 export async function createGatewayHarness({
@@ -43,7 +44,7 @@ export async function createGatewayHarness({
     return { response, body, text };
   };
 
-  const registerClient = async (redirectUris = [REDIRECT_URI]) => {
+  const registerClient = async (redirectUris = [REDIRECT_URI], clientName = 'ChatGPT Web test client') => {
     const { response, body } = await requestJson('/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -52,20 +53,25 @@ export async function createGatewayHarness({
         token_endpoint_auth_method: 'none',
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
-        client_name: 'ChatGPT Web test client',
+        client_name: clientName,
         scope: CHATGPT_WEB_SCOPE,
       }),
     });
     return { response, body };
   };
 
-  const beginAuthorization = async ({ clientId, scope = CHATGPT_WEB_SCOPE, resource = RESOURCE_URL.href } = {}) => {
+  const beginAuthorization = async ({
+    clientId,
+    redirectUri = REDIRECT_URI,
+    scope = CHATGPT_WEB_SCOPE,
+    resource = RESOURCE_URL.href,
+  } = {}) => {
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     const state = randomBytes(12).toString('hex');
     const params = new URLSearchParams({
       client_id: clientId,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri,
       response_type: 'code',
       code_challenge: challenge,
       code_challenge_method: 'S256',

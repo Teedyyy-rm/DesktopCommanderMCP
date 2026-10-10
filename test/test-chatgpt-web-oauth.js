@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CHATGPT_WEB_SCOPE } from '../dist/chatgpt-web/oauth.js';
-import { createGatewayHarness, REDIRECT_URI, RESOURCE_URL, TEST_ACCESS_KEY } from './chatgpt-web-test-helpers.js';
+import {
+  CLAUDE_REDIRECT_URI,
+  createGatewayHarness,
+  REDIRECT_URI,
+  RESOURCE_URL,
+  TEST_ACCESS_KEY,
+} from './chatgpt-web-test-helpers.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -18,19 +24,28 @@ async function verifyClientRegistrationSurvivesRestart() {
     const registration = await firstGateway.registerClient();
     assert.equal(registration.response.status, 201);
     const clientId = registration.body.client_id;
+    const claudeRegistration = await firstGateway.registerClient([CLAUDE_REDIRECT_URI], 'Claude Web restart test client');
+    assert.equal(claudeRegistration.response.status, 201);
+    const claudeClientId = claudeRegistration.body.client_id;
     await firstGateway.close();
     firstGateway = undefined;
 
     const storeMode = (await stat(clientStorePath)).mode & 0o777;
     assert.equal(storeMode, 0o600, 'persisted OAuth client metadata should be private to the gateway user');
     const storedClients = JSON.parse(await readFile(clientStorePath, 'utf8'));
-    assert.equal(storedClients.length, 1);
-    assert.equal(storedClients[0].client_id, clientId);
+    assert.equal(storedClients.length, 2);
+    assert.deepEqual(new Set(storedClients.map((client) => client.client_id)), new Set([clientId, claudeClientId]));
 
     restartedGateway = await createGatewayHarness({ clientStorePath });
     const resumedAuthorization = await restartedGateway.beginAuthorization({ clientId });
     assert.equal(resumedAuthorization.response.status, 200, 'the previous DCR client should remain valid after a gateway restart');
     assert.ok(resumedAuthorization.transaction);
+    const resumedClaudeAuthorization = await restartedGateway.beginAuthorization({
+      clientId: claudeClientId,
+      redirectUri: CLAUDE_REDIRECT_URI,
+    });
+    assert.equal(resumedClaudeAuthorization.response.status, 200, 'the Claude DCR client should remain valid after a gateway restart');
+    assert.ok(resumedClaudeAuthorization.transaction);
   } finally {
     await firstGateway?.close();
     await restartedGateway?.close();
@@ -55,12 +70,46 @@ async function run() {
 
     const rejectedClient = await harness.registerClient(['https://attacker.example/oauth/callback']);
     assert.equal(rejectedClient.response.status, 400, 'untrusted DCR callback must be rejected');
+    const spoofedClaudeClient = await harness.registerClient(['https://claude.ai.attacker.example/api/mcp/auth_callback']);
+    assert.equal(spoofedClaudeClient.response.status, 400, 'a hostname that only resembles Claude must be rejected');
+    const wrongClaudePathClient = await harness.registerClient(['https://claude.ai/other/callback']);
+    assert.equal(wrongClaudePathClient.response.status, 400, 'unregistered Claude callback paths must be rejected');
 
     const registration = await harness.registerClient();
     assert.equal(registration.response.status, 201, 'ChatGPT public client callback should register');
     assert.equal(registration.body.token_endpoint_auth_method, 'none');
     assert.ok(registration.body.client_id);
     const clientId = registration.body.client_id;
+
+    const claudeRegistration = await harness.registerClient([CLAUDE_REDIRECT_URI], 'Claude Web test client');
+    assert.equal(claudeRegistration.response.status, 201, 'Claude Web public callback should register');
+    const claudeAuthorization = await harness.beginAuthorization({
+      clientId: claudeRegistration.body.client_id,
+      redirectUri: CLAUDE_REDIRECT_URI,
+    });
+    assert.equal(claudeAuthorization.response.status, 200, 'Claude Web should receive the authorization page');
+    assert.match(
+      claudeAuthorization.response.headers.get('content-security-policy'),
+      /form-action 'self' https:\/\/chatgpt\.com https:\/\/claude\.ai/,
+      'the sign-in form should allow only the supported remote MCP callback origins',
+    );
+    assert.match(claudeAuthorization.html, /Continue to Desktop Commander/);
+    assert.doesNotMatch(claudeAuthorization.html, /Continue to ChatGPT/);
+    const claudeLogin = await harness.submitLogin({ transaction: claudeAuthorization.transaction });
+    assert.equal(claudeLogin.response.status, 303);
+    const claudeRedirect = new URL(claudeLogin.location);
+    assert.equal(claudeRedirect.origin + claudeRedirect.pathname, CLAUDE_REDIRECT_URI);
+    assert.equal(claudeRedirect.searchParams.get('state'), claudeAuthorization.state);
+    const claudeToken = await harness.exchangeCode({
+      clientId: claudeRegistration.body.client_id,
+      code: claudeRedirect.searchParams.get('code'),
+      verifier: claudeAuthorization.verifier,
+      redirectUri: CLAUDE_REDIRECT_URI,
+    });
+    assert.equal(claudeToken.response.status, 200, 'Claude Web should complete the authorization-code exchange');
+    assert.equal(claudeToken.body.token_type, 'Bearer');
+    assert.ok(claudeToken.body.access_token);
+    assert.ok(claudeToken.body.refresh_token);
 
     const unsupportedScope = await harness.beginAuthorization({ clientId, scope: 'desktop-commander.read' });
     assert.equal(unsupportedScope.response.status, 302);
@@ -74,10 +123,10 @@ async function run() {
     assert.equal(failedLoginFlow.response.status, 200);
     assert.match(
       failedLoginFlow.response.headers.get('content-security-policy'),
-      /form-action 'self' https:\/\/chatgpt\.com/,
-      'the sign-in form must allow its OAuth redirect to ChatGPT',
+      /form-action 'self' https:\/\/chatgpt\.com https:\/\/claude\.ai/,
+      'the sign-in form must allow the supported OAuth callbacks',
     );
-    assert.match(failedLoginFlow.html, /Continue to ChatGPT/);
+    assert.match(failedLoginFlow.html, /Continue to Desktop Commander/);
     assert.doesNotMatch(failedLoginFlow.html, /name="accessKey"/);
     assert.doesNotMatch(failedLoginFlow.html, /name="username"/);
     const failedLogin = await harness.submitLogin({
@@ -174,7 +223,7 @@ async function run() {
     });
     assert.equal(expiredAccessToken.status, 401, 'expired bearer token must be rejected on the MCP route');
 
-    console.log('✓ ChatGPT Web OAuth metadata, persistent DCR clients, callback allowlist, default env key, non-expiring one-use login, PKCE, audience, scope and token expiry checks passed');
+    console.log('✓ ChatGPT and Claude Web OAuth metadata, DCR clients, callback allowlist, default env key, one-use login, PKCE, audience, scope and token expiry checks passed');
   } finally {
     await harness.close();
   }

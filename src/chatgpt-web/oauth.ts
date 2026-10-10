@@ -116,19 +116,22 @@ function hashAccessKey(value: string): Buffer {
 }
 
 /**
- * ChatGPT Web's OAuth callback URLs are deliberately allowlisted. This keeps
+ * Remote MCP OAuth callback URLs are deliberately allowlisted. This keeps
  * dynamic client registration from turning the single-user login into an open
  * authorization redirect for arbitrary clients.
  */
-export function isAllowedChatGptRedirectUri(value: string): boolean {
+export function isAllowedRemoteMcpRedirectUri(value: string): boolean {
   try {
     const redirect = new URL(value);
-    if (redirect.protocol !== 'https:' || redirect.hostname !== 'chatgpt.com' ||
+    if (redirect.protocol !== 'https:' ||
       redirect.port || redirect.username || redirect.password || redirect.search || redirect.hash) {
       return false;
     }
-    return redirect.pathname === '/connector_platform_oauth_redirect' ||
-      /^\/connector\/oauth\/[A-Za-z0-9_-]{1,128}$/.test(redirect.pathname);
+    if (redirect.hostname === 'chatgpt.com') {
+      return redirect.pathname === '/connector_platform_oauth_redirect' ||
+        /^\/connector\/oauth\/[A-Za-z0-9_-]{1,128}$/.test(redirect.pathname);
+    }
+    return redirect.hostname === 'claude.ai' && redirect.pathname === '/api/mcp/auth_callback';
   } catch {
     return false;
   }
@@ -196,9 +199,9 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     if (client.scope && scopes.some((scope) => !client.scope!.split(/\s+/).includes(scope))) {
       throw new InvalidScopeError('The requested scope was not registered for this client.');
     }
-    if (!isAllowedChatGptRedirectUri(params.redirectUri) ||
+    if (!isAllowedRemoteMcpRedirectUri(params.redirectUri) ||
       !client.redirect_uris.includes(params.redirectUri)) {
-      throw new AccessDeniedError('The ChatGPT OAuth callback is not registered.');
+      throw new AccessDeniedError('The supported MCP client callback is not registered.');
     }
 
     this.pruneExpired();
@@ -222,17 +225,17 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    // OAuth completes with a cross-origin redirect back to ChatGPT. Chromium
-    // can block that redirect when the initiating form's CSP only allows self.
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; base-uri 'none'; frame-ancestors 'none'");
+    // OAuth completes with a cross-origin redirect back to the MCP client.
+    // Chromium can block that redirect when the initiating form's CSP only allows self.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com https://claude.ai; base-uri 'none'; frame-ancestors 'none'");
     res.status(200).type('html').send(`<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Desktop Commander sign in</title>
 <body><main><h1>Sign in to Desktop Commander</h1>
-<p>The gateway will use its configured single-user key to authorize this ChatGPT connection.</p>
+<p>The gateway will use its configured single-user key to authorize this MCP connection.</p>
 <form method="post" action="/login">
 <input type="hidden" name="transaction" value="${transaction}">
-<button type="submit">Continue to ChatGPT</button></form></main></body></html>`);
+<button type="submit">Continue to Desktop Commander</button></form></main></body></html>`);
   }
 
   /** Use an explicitly supplied key or the private gateway key, then consume the one-use authorization. */
@@ -395,11 +398,11 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     const requestedScopes = client.scope?.split(/\s+/).filter(Boolean) ?? [];
     if (client.token_endpoint_auth_method !== 'none' ||
       client.redirect_uris.length === 0 ||
-      client.redirect_uris.some((uri) => !isAllowedChatGptRedirectUri(uri)) ||
+      client.redirect_uris.some((uri) => !isAllowedRemoteMcpRedirectUri(uri)) ||
       requestedScopes.some((scope) => scope !== CHATGPT_WEB_SCOPE) ||
       client.grant_types?.some((grant) => !['authorization_code', 'refresh_token'].includes(grant)) ||
       client.response_types?.some((responseType) => responseType !== 'code')) {
-      throw new InvalidClientMetadataError('Only ChatGPT Web public clients using the registered HTTPS callback are accepted.');
+      throw new InvalidClientMetadataError('Only ChatGPT and Claude Web public clients using their registered HTTPS callbacks are accepted.');
     }
     if (this.clients.size >= MAX_REGISTERED_CLIENTS) {
       throw new InvalidClientMetadataError('The registered client limit has been reached.');
@@ -454,7 +457,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     return typeof client.client_id === 'string' && client.client_id.length > 0 && client.client_id.length <= 512 &&
       (client.client_id_issued_at === undefined || Number.isFinite(client.client_id_issued_at)) &&
       client.token_endpoint_auth_method === 'none' && Array.isArray(client.redirect_uris) && client.redirect_uris.length > 0 &&
-      client.redirect_uris.every((uri) => typeof uri === 'string' && isAllowedChatGptRedirectUri(uri)) &&
+      client.redirect_uris.every((uri) => typeof uri === 'string' && isAllowedRemoteMcpRedirectUri(uri)) &&
       scopes.every((scope) => scope === CHATGPT_WEB_SCOPE) &&
       (client.grant_types === undefined || (Array.isArray(client.grant_types) && client.grant_types.every((grant) => ['authorization_code', 'refresh_token'].includes(grant)))) &&
       (client.response_types === undefined || (Array.isArray(client.response_types) && client.response_types.every((type) => type === 'code')));

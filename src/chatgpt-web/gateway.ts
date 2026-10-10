@@ -200,25 +200,25 @@ export function createChatGptWebApp(options: ChatGptWebGatewayOptions): {
       const message = result.status === 429
         ? 'Sign-in is temporarily rate limited. Try again later.'
         : result.status === 400
-          ? 'This sign-in request is no longer available. Start a new connection from ChatGPT.'
+          ? 'This sign-in request is no longer available. Start a new connection from your MCP client.'
           : 'The access key is incorrect. Try again.';
       const retryForm = result.status === 401 && /^[A-Za-z0-9_-]{43}$/.test(transaction)
         ? `<form method="post" action="/login" autocomplete="off"><input type="hidden" name="transaction" value="${transaction}"><label>Access key <input name="accessKey" type="password" autocomplete="off" required autofocus></label><button type="submit">Try again</button></form>`
         : result.status === 400
-          ? '<p>Return to ChatGPT and start the connection again from the app.</p>'
-          : '<p>Return to ChatGPT and try again later.</p>';
+          ? '<p>Return to your MCP client and start the connection again.</p>'
+          : '<p>Return to your MCP client and try again later.</p>';
       res.status(result.status).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in failed</title><body><h1>Sign in failed</h1><p>${message}</p>${retryForm}</body></html>`);
       return;
     }
     res.setHeader('Cache-Control', 'no-store');
     if ('alreadyCompleted' in result) {
-      console.info('[ChatGPT Web OAuth] Replayed login submission acknowledged after token exchange.');
+      console.info('[Desktop Commander OAuth] Replayed login submission acknowledged after token exchange.');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Content-Security-Policy', "default-src 'none'; base-uri 'none'; frame-ancestors 'none'");
-      res.status(200).type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><title>Desktop Commander connected</title><body><h1>Authorization already completed</h1><p>Return to ChatGPT to continue using Desktop Commander.</p></body></html>');
+      res.status(200).type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><title>Desktop Commander connected</title><body><h1>Authorization already completed</h1><p>Return to your MCP client to continue using Desktop Commander.</p></body></html>');
       return;
     }
-    console.info('[ChatGPT Web OAuth] Login accepted; redirecting to the ChatGPT callback.');
+    console.info('[Desktop Commander OAuth] Login accepted; redirecting to the MCP client callback.');
     res.redirect(303, result.redirectUrl);
   });
 
