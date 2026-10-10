@@ -24,9 +24,14 @@ async function verifyClientRegistrationSurvivesRestart() {
     const registration = await firstGateway.registerClient();
     assert.equal(registration.response.status, 201);
     const clientId = registration.body.client_id;
-    const claudeRegistration = await firstGateway.registerClient([CLAUDE_REDIRECT_URI], 'Claude Web restart test client');
+    const claudeRegistration = await firstGateway.registerClient(
+      [CLAUDE_REDIRECT_URI],
+      'Claude Web restart test client',
+      'client_secret_post',
+    );
     assert.equal(claudeRegistration.response.status, 201);
     const claudeClientId = claudeRegistration.body.client_id;
+    assert.match(claudeRegistration.body.client_secret, /^[a-f0-9]{64}$/);
     await firstGateway.close();
     firstGateway = undefined;
 
@@ -35,6 +40,9 @@ async function verifyClientRegistrationSurvivesRestart() {
     const storedClients = JSON.parse(await readFile(clientStorePath, 'utf8'));
     assert.equal(storedClients.length, 2);
     assert.deepEqual(new Set(storedClients.map((client) => client.client_id)), new Set([clientId, claudeClientId]));
+    const storedClaudeClient = storedClients.find((client) => client.client_id === claudeClientId);
+    assert.equal(storedClaudeClient.token_endpoint_auth_method, 'client_secret_post');
+    assert.equal(storedClaudeClient.client_secret, claudeRegistration.body.client_secret);
 
     restartedGateway = await createGatewayHarness({ clientStorePath });
     const resumedAuthorization = await restartedGateway.beginAuthorization({ clientId });
@@ -74,6 +82,18 @@ async function run() {
     assert.equal(spoofedClaudeClient.response.status, 400, 'a hostname that only resembles Claude must be rejected');
     const wrongClaudePathClient = await harness.registerClient(['https://claude.ai/other/callback']);
     assert.equal(wrongClaudePathClient.response.status, 400, 'unregistered Claude callback paths must be rejected');
+    const confidentialChatGptClient = await harness.registerClient(
+      [REDIRECT_URI],
+      'ChatGPT confidential test client',
+      'client_secret_post',
+    );
+    assert.equal(confidentialChatGptClient.response.status, 400, 'client-secret auth should be restricted to Claude Web callback clients');
+    const mixedCallbackClient = await harness.registerClient(
+      [CLAUDE_REDIRECT_URI, REDIRECT_URI],
+      'Mixed callback test client',
+      'client_secret_post',
+    );
+    assert.equal(mixedCallbackClient.response.status, 400, 'Claude confidential clients must use only the official Claude callback');
 
     const registration = await harness.registerClient();
     assert.equal(registration.response.status, 201, 'ChatGPT public client callback should register');
@@ -81,8 +101,14 @@ async function run() {
     assert.ok(registration.body.client_id);
     const clientId = registration.body.client_id;
 
-    const claudeRegistration = await harness.registerClient([CLAUDE_REDIRECT_URI], 'Claude Web test client');
-    assert.equal(claudeRegistration.response.status, 201, 'Claude Web public callback should register');
+    const claudeRegistration = await harness.registerClient(
+      [CLAUDE_REDIRECT_URI],
+      'Claude Web test client',
+      'client_secret_post',
+    );
+    assert.equal(claudeRegistration.response.status, 201, 'Claude Web client_secret_post callback should register');
+    assert.equal(claudeRegistration.body.token_endpoint_auth_method, 'client_secret_post');
+    assert.match(claudeRegistration.body.client_secret, /^[a-f0-9]{64}$/);
     const claudeAuthorization = await harness.beginAuthorization({
       clientId: claudeRegistration.body.client_id,
       redirectUri: CLAUDE_REDIRECT_URI,
@@ -100,8 +126,18 @@ async function run() {
     const claudeRedirect = new URL(claudeLogin.location);
     assert.equal(claudeRedirect.origin + claudeRedirect.pathname, CLAUDE_REDIRECT_URI);
     assert.equal(claudeRedirect.searchParams.get('state'), claudeAuthorization.state);
+    const wrongClaudeSecretToken = await harness.exchangeCode({
+      clientId: claudeRegistration.body.client_id,
+      clientSecret: '0'.repeat(64),
+      code: claudeRedirect.searchParams.get('code'),
+      verifier: claudeAuthorization.verifier,
+      redirectUri: CLAUDE_REDIRECT_URI,
+    });
+    assert.equal(wrongClaudeSecretToken.response.status, 400, 'Claude client secret must be checked by the OAuth server');
+    assert.equal(wrongClaudeSecretToken.body.error, 'invalid_client');
     const claudeToken = await harness.exchangeCode({
       clientId: claudeRegistration.body.client_id,
+      clientSecret: claudeRegistration.body.client_secret,
       code: claudeRedirect.searchParams.get('code'),
       verifier: claudeAuthorization.verifier,
       redirectUri: CLAUDE_REDIRECT_URI,

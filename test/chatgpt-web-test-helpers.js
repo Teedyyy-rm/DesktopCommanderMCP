@@ -44,13 +44,17 @@ export async function createGatewayHarness({
     return { response, body, text };
   };
 
-  const registerClient = async (redirectUris = [REDIRECT_URI], clientName = 'ChatGPT Web test client') => {
+  const registerClient = async (
+    redirectUris = [REDIRECT_URI],
+    clientName = 'ChatGPT Web test client',
+    tokenEndpointAuthMethod = 'none',
+  ) => {
     const { response, body } = await requestJson('/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         redirect_uris: redirectUris,
-        token_endpoint_auth_method: 'none',
+        token_endpoint_auth_method: tokenEndpointAuthMethod,
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         client_name: clientName,
@@ -97,18 +101,20 @@ export async function createGatewayHarness({
     return { response, location: response.headers.get('location'), text: await response.text() };
   };
 
-  const exchangeCode = async ({ clientId, code, verifier, redirectUri = REDIRECT_URI, resource = RESOURCE_URL.href } = {}) => {
+  const exchangeCode = async ({ clientId, clientSecret, code, verifier, redirectUri = REDIRECT_URI, resource = RESOURCE_URL.href } = {}) => {
+    const formBody = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      code,
+      code_verifier: verifier,
+      redirect_uri: redirectUri,
+      resource,
+    });
+    if (typeof clientSecret === 'string') formBody.set('client_secret', clientSecret);
     const response = await fetch(new URL('/token', baseUrl), {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: clientId,
-        code,
-        code_verifier: verifier,
-        redirect_uri: redirectUri,
-        resource,
-      }),
+      body: formBody,
     });
     let body;
     try {

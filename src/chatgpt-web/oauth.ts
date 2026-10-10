@@ -137,6 +137,20 @@ export function isAllowedRemoteMcpRedirectUri(value: string): boolean {
   }
 }
 
+const CLAUDE_REMOTE_MCP_REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
+
+function isPersistableOAuthClient(value: Partial<OAuthClientInformationFull>): boolean {
+  if (value.token_endpoint_auth_method === 'none') {
+    return value.client_secret === undefined && value.client_secret_expires_at === undefined;
+  }
+  return value.token_endpoint_auth_method === 'client_secret_post' &&
+    Array.isArray(value.redirect_uris) &&
+    value.redirect_uris.length === 1 &&
+    value.redirect_uris[0] === CLAUDE_REMOTE_MCP_REDIRECT_URI &&
+    typeof value.client_secret === 'string' && /^[a-f0-9]{64}$/.test(value.client_secret) &&
+    (value.client_secret_expires_at === undefined || Number.isFinite(value.client_secret_expires_at));
+}
+
 export class ChatGptWebOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
   private readonly accessKeyDigest: Buffer;
@@ -396,7 +410,11 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>,
   ): OAuthClientInformationFull {
     const requestedScopes = client.scope?.split(/\s+/).filter(Boolean) ?? [];
-    if (client.token_endpoint_auth_method !== 'none' ||
+    const isClaudeConfidentialClient = client.token_endpoint_auth_method === 'client_secret_post' &&
+      client.redirect_uris.length === 1 &&
+      client.redirect_uris[0] === CLAUDE_REMOTE_MCP_REDIRECT_URI &&
+      typeof client.client_secret === 'string' && /^[a-f0-9]{64}$/.test(client.client_secret);
+    if ((client.token_endpoint_auth_method !== 'none' && !isClaudeConfidentialClient) ||
       client.redirect_uris.length === 0 ||
       client.redirect_uris.some((uri) => !isAllowedRemoteMcpRedirectUri(uri)) ||
       requestedScopes.some((scope) => scope !== CHATGPT_WEB_SCOPE) ||
@@ -456,7 +474,7 @@ export class ChatGptWebOAuthProvider implements OAuthServerProvider {
     const scopes = client.scope?.split(/\s+/).filter(Boolean) ?? [];
     return typeof client.client_id === 'string' && client.client_id.length > 0 && client.client_id.length <= 512 &&
       (client.client_id_issued_at === undefined || Number.isFinite(client.client_id_issued_at)) &&
-      client.token_endpoint_auth_method === 'none' && Array.isArray(client.redirect_uris) && client.redirect_uris.length > 0 &&
+      isPersistableOAuthClient(client) && Array.isArray(client.redirect_uris) && client.redirect_uris.length > 0 &&
       client.redirect_uris.every((uri) => typeof uri === 'string' && isAllowedRemoteMcpRedirectUri(uri)) &&
       scopes.every((scope) => scope === CHATGPT_WEB_SCOPE) &&
       (client.grant_types === undefined || (Array.isArray(client.grant_types) && client.grant_types.every((grant) => ['authorization_code', 'refresh_token'].includes(grant)))) &&
